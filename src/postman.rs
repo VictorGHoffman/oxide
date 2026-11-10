@@ -301,6 +301,7 @@ fn parse_request(value: &Value, inherited_auth: Option<&Value>, counter: &mut Co
     if let Some(url) = value.as_str() {
         set_url_from_string(&mut req, url);
         finish_all(&mut req);
+        req.sync_query();
         return req;
     }
 
@@ -411,6 +412,7 @@ fn parse_request(value: &Value, inherited_auth: Option<&Value>, counter: &mut Co
     }
 
     finish_all(&mut req);
+    req.sync_query();
     req
 }
 
@@ -648,7 +650,9 @@ fn encode_query(s: &str) -> String {
 }
 
 fn export_url(req: &Request) -> Value {
-    let base = req.url.trim();
+    // The URL text holds the enabled params as its query string; Postman wants them apart.
+    let full = req.url.trim();
+    let base = full.split(['?', '#']).next().unwrap_or(full);
     let params: Vec<&KeyValue> = live(&req.params).collect();
 
     let query = params
@@ -660,14 +664,12 @@ fn export_url(req: &Request) -> Value {
 
     let raw = if query.is_empty() {
         base.to_string()
-    } else if base.contains('?') {
-        format!("{base}&{query}")
     } else {
         format!("{base}?{query}")
     };
 
     // Split the base into the parts Postman keeps next to `raw`.
-    let without_query = base.split('?').next().unwrap_or(base);
+    let without_query = base;
     let (protocol, rest) = match without_query.split_once("://") {
         Some((protocol, rest)) => (Some(protocol), rest),
         None => (None, without_query),
@@ -774,7 +776,7 @@ mod tests {
         assert_eq!(collection.name, "Demo");
 
         let list = collection.children[0].children[0].request().unwrap();
-        assert_eq!(list.url, "https://api.test/users");
+        assert_eq!(list.url, "https://api.test/users?page=2");
         assert_eq!(list.params.len(), 3); // page, off (disabled), blank row
         assert!(list.params[0].enabled && !list.params[1].enabled);
         assert!(list.headers[0].enabled && !list.headers[1].enabled);
@@ -827,6 +829,7 @@ mod tests {
             req.api_key_value = "v".into();
             req.api_key_in = ApiKeyLocation::Query;
         }
+        tree.request_mut(id).unwrap().url_from_params();
         let original = tree.request(id).unwrap().clone();
 
         let json = export(tree.get(collection).unwrap());

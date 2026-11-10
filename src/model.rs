@@ -81,6 +81,136 @@ impl KeyValue {
     }
 }
 
+// ───────────────────────── URL <-> query params ─────────────────────────
+
+/// Splits `base ? query # fragment` (the fragment keeps its `#`).
+fn split_url(url: &str) -> (&str, &str, &str) {
+    let (before_fragment, fragment) = match url.find('#') {
+        Some(i) => (&url[..i], &url[i..]),
+        None => (url, ""),
+    };
+    match before_fragment.split_once('?') {
+        Some((base, query)) => (base, query, fragment),
+        None => (before_fragment, "", fragment),
+    }
+}
+
+/// Decodes `%XX` sequences (a `+` stays a plus). Invalid sequences are kept as typed.
+fn percent_decode(s: &str) -> String {
+    fn hex(b: u8) -> Option<u8> {
+        match b {
+            b'0'..=b'9' => Some(b - b'0'),
+            b'a'..=b'f' => Some(b - b'a' + 10),
+            b'A'..=b'F' => Some(b - b'A' + 10),
+            _ => None,
+        }
+    }
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(h), Some(l)) = (hex(bytes[i + 1]), hex(bytes[i + 2])) {
+                out.push(h * 16 + l);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Only what would break the `key=value&key=value` structure is escaped.
+fn escape_query_part(s: &str, is_key: bool) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("%26"),
+            '#' => out.push_str("%23"),
+            '=' if is_key => out.push_str("%3D"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+impl Request {
+    /// Rewrites the URL's query string from the enabled params (the URL's base and
+    /// fragment are kept). Call after the params table changed.
+    pub fn url_from_params(&mut self) {
+        let query = self
+            .params
+            .iter()
+            .filter(|p| p.enabled && !p.key.trim().is_empty())
+            .map(|p| {
+                format!(
+                    "{}={}",
+                    escape_query_part(p.key.trim(), true),
+                    escape_query_part(&p.value, false)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("&");
+
+        let (base, _, fragment) = split_url(&self.url);
+        let separator = if query.is_empty() { "" } else { "?" };
+        self.url = format!("{base}{separator}{query}{fragment}");
+    }
+
+    /// Updates the params table from the URL's query string. Enabled rows follow the
+    /// URL (in order); disabled rows and the blank row are left where they are.
+    pub fn params_from_url(&mut self) {
+        let (_, query, _) = split_url(&self.url);
+        let mut parsed: std::collections::VecDeque<KeyValue> = query
+            .split('&')
+            .filter(|pair| !pair.is_empty())
+            .map(|pair| {
+                let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+                KeyValue {
+                    enabled: true,
+                    key: percent_decode(key),
+                    value: percent_decode(value),
+                }
+            })
+            .collect();
+
+        let mut rows = Vec::with_capacity(self.params.len() + parsed.len());
+        for row in self.params.drain(..) {
+            if row.is_blank() || !row.enabled {
+                rows.push(row);
+            } else if let Some(next) = parsed.pop_front() {
+                rows.push(next);
+            }
+        }
+
+        // Params that are new in the URL go above the trailing blank row.
+        let at = if rows.last().is_some_and(KeyValue::is_blank) {
+            rows.len() - 1
+        } else {
+            rows.len()
+        };
+        for (offset, row) in parsed.into_iter().enumerate() {
+            rows.insert(at + offset, row);
+        }
+        if !rows.last().is_some_and(KeyValue::is_blank) {
+            rows.push(KeyValue::empty());
+        }
+        self.params = rows;
+    }
+
+    /// Brings URL and params in line (used for requests saved before they were linked,
+    /// and for imported ones): the URL's own query wins, otherwise the params fill it.
+    pub fn sync_query(&mut self) {
+        if split_url(&self.url).1.is_empty() {
+            self.url_from_params();
+        } else {
+            self.params_from_url();
+        }
+    }
+}
+
 /// A key/value table always keeps one trailing blank row to type into.
 pub fn blank_table() -> Vec<KeyValue> {
     vec![KeyValue::empty()]
@@ -514,6 +644,19 @@ impl Tree {
 
     /// Deep-copies a node right after the original, with fresh ids and a
     /// `_1`, `_2`, … suffixed name.
+    /// Links every request's URL with its params (see [`Request::sync_query`]).
+    pub fn sync_queries(&mut self) {
+        fn walk(nodes: &mut [Node]) {
+            for node in nodes {
+                if let Some(req) = node.request_mut() {
+                    req.sync_query();
+                }
+                walk(&mut node.children);
+            }
+        }
+        walk(&mut self.roots);
+    }
+
     pub fn duplicate(&mut self, id: Id) -> Option<Id> {
         let parent = self.parent_of(id)?;
         let mut next = self.next_id;
@@ -535,6 +678,36 @@ impl Tree {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn url_and_params_follow_each_other() {
+        let mut r = Request::default();
+        r.url = "https://x.test/a?b=1&c=2%263#top".into();
+        r.params.clear();
+        r.params_from_url();
+        assert_eq!(r.params[0].key, "b");
+        assert_eq!(r.params[1].value, "2&3");
+        assert!(r.params.last().unwrap().is_blank());
+
+        // Disabling a param removes it from the URL but keeps the row.
+        r.params[0].enabled = false;
+        r.url_from_params();
+        assert_eq!(r.url, "https://x.test/a?c=2%263#top");
+        assert_eq!(r.params.len(), 3);
+
+        // Editing the URL keeps the disabled row where it was.
+        r.url = "https://x.test/a?c=9&d=4".into();
+        r.params_from_url();
+        let keys: Vec<&str> = r.params.iter().map(|p| p.key.as_str()).collect();
+        assert_eq!(keys, ["b", "c", "d", ""]);
+        assert!(!r.params[0].enabled);
+
+        // Removing everything leaves a clean URL.
+        r.url = "https://x.test/a".into();
+        r.params_from_url();
+        r.url_from_params();
+        assert_eq!(r.url, "https://x.test/a");
+    }
 
     #[test]
     fn duplicate_names_count_up() {

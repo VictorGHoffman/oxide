@@ -75,14 +75,9 @@ fn build_url(req: &Request) -> Result<reqwest::Url, String> {
         && !req.api_key_name.trim().is_empty())
     .then(|| (req.api_key_name.trim(), req.api_key_value.as_str()));
 
-    if enabled(&req.params).next().is_some() || api_key_param.is_some() {
-        let mut pairs = url.query_pairs_mut();
-        for p in enabled(&req.params) {
-            pairs.append_pair(p.key.trim(), &p.value);
-        }
-        if let Some((k, v)) = api_key_param {
-            pairs.append_pair(k, v);
-        }
+    // The URL already carries the enabled params as its query string.
+    if let Some((k, v)) = api_key_param {
+        url.query_pairs_mut().append_pair(k, v);
     }
 
     Ok(url)

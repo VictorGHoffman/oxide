@@ -336,6 +336,9 @@ impl Oxide {
             Ok(None) => (starter_tree(), None),
             Err(e) => (starter_tree(), Some(e)),
         };
+        let mut tree = tree;
+        // Older files kept the query params apart from the URL: link them.
+        tree.sync_queries();
         let selected = tree.first_collection();
 
         let mut app = Self {
@@ -872,9 +875,21 @@ impl Oxide {
             return false;
         };
 
+        // Params and the URL's query string mirror each other.
+        let params_changed = matches!(
+            edit,
+            Edit::KvToggle(KvList::Params, ..)
+                | Edit::KvKey(KvList::Params, ..)
+                | Edit::KvValue(KvList::Params, ..)
+                | Edit::KvRemove(KvList::Params, ..)
+        );
+
         match edit {
             Edit::Method(m) => req.method = m,
-            Edit::Url(url) => req.url = url,
+            Edit::Url(url) => {
+                req.url = url;
+                req.params_from_url();
+            }
             Edit::KvToggle(list, i, on) => {
                 if let Some(row) = table_mut(req, list).get_mut(i) {
                     row.enabled = on;
@@ -929,6 +944,9 @@ impl Oxide {
             Edit::ApiKeyName(v) => req.api_key_name = v,
             Edit::ApiKeyValue(v) => req.api_key_value = v,
             Edit::ApiKeyIn(v) => req.api_key_in = v,
+        }
+        if params_changed {
+            req.url_from_params();
         }
         true
     }
