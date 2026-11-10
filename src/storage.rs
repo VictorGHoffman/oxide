@@ -66,6 +66,9 @@ pub struct SessionTab {
 pub struct Session {
     pub tabs: Vec<SessionTab>,
     pub active: Option<Id>,
+    /// Name of the selected theme.
+    #[serde(default)]
+    pub theme: Option<String>,
 }
 
 fn session_path() -> Option<PathBuf> {

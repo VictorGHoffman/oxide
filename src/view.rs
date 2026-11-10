@@ -11,6 +11,7 @@ use iced::{color, Border, Color, Element, Fill, Length, Padding, Theme};
 use crate::app::*;
 use crate::http::{format_duration, format_size};
 use crate::model::*;
+use crate::theme;
 
 // ───────────────────────────── palette helpers ─────────────────────────────
 
@@ -496,6 +497,8 @@ impl Oxide {
             );
         }
 
+        sidebar = sidebar.push(self.theme_bar());
+
         let width = self.sidebar_width.clamp(
             MIN_SIDEBAR,
             (self.window_size.width - 320.0).clamp(MIN_SIDEBAR, MAX_SIDEBAR),
@@ -507,13 +510,126 @@ impl Oxide {
             .into()
     }
 
+    /// Light/dark switch: a sun while the theme is dark, a moon while it is light.
+    /// Drawn in the text colour only, so it follows the theme.
+    fn theme_toggle(&self) -> Element<'_, Message> {
+        let dark = self.theme().extended_palette().is_dark;
+        let label = if dark {
+            "Switch to a light theme"
+        } else {
+            "Switch to a dark theme"
+        };
+
+        let ink = |theme: &Theme| theme.palette().text.scale_alpha(0.8);
+        // A filled circle in the text colour, or in the panel colour (to carve the moon).
+        let disc = |size: f32, carve: bool| {
+            container(space())
+                .width(size)
+                .height(size)
+                .style(move |theme: &Theme| container::Style {
+                    background: Some(
+                        if carve {
+                            theme.extended_palette().background.weaker.color
+                        } else {
+                            ink(theme)
+                        }
+                        .into(),
+                    ),
+                    border: Border {
+                        radius: (size / 2.0).into(),
+                        ..Border::default()
+                    },
+                    ..container::Style::default()
+                })
+        };
+        let ray = |width: f32, height: f32| {
+            container(space())
+                .width(width)
+                .height(height)
+                .style(move |theme: &Theme| container::Style {
+                    background: Some(ink(theme).into()),
+                    border: Border {
+                        radius: 1.0.into(),
+                        ..Border::default()
+                    },
+                    ..container::Style::default()
+                })
+        };
+
+        let icon: Element<'_, Message> = if dark {
+            // Sun: a disc with four rays.
+            column![
+                ray(2.0, 3.0),
+                row![ray(3.0, 2.0), disc(8.0, false), ray(3.0, 2.0)]
+                    .spacing(1)
+                    .align_y(iced::Center),
+                ray(2.0, 3.0),
+            ]
+            .spacing(1)
+            .align_x(iced::Center)
+            .into()
+        } else {
+            // Moon: a disc with a bite taken out of its top-right.
+            stack![
+                disc(15.0, false),
+                container(disc(11.0, true))
+                    .width(15)
+                    .height(15)
+                    .align_x(iced::alignment::Horizontal::Right)
+                    .align_y(iced::alignment::Vertical::Top),
+            ]
+            .width(15)
+            .height(15)
+            .into()
+        };
+
+        tooltip(
+            button(container(icon).width(16).height(16).center(16))
+                .padding(Padding::from([4, 6]))
+                .style(|_theme: &Theme, _status| button::Style::default())
+                .on_press(Message::ToggleTheme),
+            container(text(label).size(12))
+                .padding(Padding::from([4, 8]))
+                .style(card_style),
+            tooltip::Position::Top,
+        )
+        .gap(4)
+        .into()
+    }
+
+    /// Theme picker and light/dark switch at the bottom of the sidebar.
+    fn theme_bar(&self) -> Element<'_, Message> {
+        container(
+            row![
+                pick_list(
+                    theme::Choice::all(),
+                    Some(theme::Choice(self.theme_index)),
+                    Message::SetTheme
+                )
+                .width(Fill)
+                .padding(Padding::from([5, 10]))
+                .text_size(12)
+                .style(pick_style),
+                self.theme_toggle(),
+            ]
+            .spacing(6)
+            .align_y(iced::Center),
+        )
+        .padding(Padding::from([8, 10]))
+        .width(Fill)
+        .into()
+    }
+
     /// The thin strip left when the sidebar is hidden, with a button to bring it back.
     fn collapsed_sidebar(&self) -> Element<'_, Message> {
-        container(icon_button(
-            Pane::Left,
-            "Show sidebar (Ctrl+B)",
-            Message::ToggleSidebar,
-        ))
+        container(
+            column![
+                icon_button(Pane::Left, "Show sidebar (Ctrl+B)", Message::ToggleSidebar,),
+                space().height(Fill),
+                self.theme_toggle(),
+            ]
+            .align_x(iced::Center),
+        )
         .padding(Padding::from([10, 4]))
         .width(34)
         .height(Fill)

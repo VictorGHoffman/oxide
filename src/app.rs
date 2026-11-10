@@ -9,6 +9,7 @@ use crate::http;
 use crate::model::*;
 use crate::postman;
 use crate::storage;
+use crate::theme;
 
 pub const RENAME_ID: &str = "oxide-rename-input";
 pub const TABS_ID: &str = "oxide-tabs";
@@ -131,6 +132,8 @@ pub struct Drag {
 #[derive(Debug, Clone)]
 pub enum Message {
     // Layout
+    ToggleTheme,
+    SetTheme(theme::Choice),
     ToggleSidebar,
     ToggleResponseLayout,
     DragStart(Divider),
@@ -264,6 +267,8 @@ pub struct Oxide {
     pub confirm_delete: Option<Vec<Id>>,
     pub save_error: Option<String>,
     pub notice: Option<Notice>,
+    /// Index into [`theme::ENTRIES`].
+    pub theme_index: usize,
     pub sidebar_visible: bool,
     pub sidebar_width: f32,
     /// `true` = response docked on the right, `false` = below the editor.
@@ -303,6 +308,7 @@ impl Oxide {
             confirm_delete: None,
             save_error,
             notice: None,
+            theme_index: 0,
             sidebar_visible: true,
             sidebar_width: 280.0,
             response_right: false,
@@ -336,6 +342,9 @@ impl Oxide {
                 })
                 .collect(),
             active: self.active,
+            theme: theme::ENTRIES
+                .get(self.theme_index)
+                .map(|e| e.name.to_string()),
         }
     }
 
@@ -344,6 +353,9 @@ impl Oxide {
         let Some(session) = storage::load_session() else {
             return;
         };
+        if let Some(index) = session.theme.as_deref().and_then(theme::index_of) {
+            self.theme_index = index;
+        }
         for tab in session.tabs {
             let exists = self.tree.request(tab.id).is_some();
             let duplicate = self.tabs.iter().any(|t| t.request_id == tab.id);
@@ -508,7 +520,9 @@ impl Oxide {
     }
 
     pub fn theme(&self) -> Theme {
-        crate::theme::oxide()
+        theme::ENTRIES
+            .get(self.theme_index)
+            .map_or_else(theme::oxide, |e| (e.make)())
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
@@ -1002,6 +1016,8 @@ impl Oxide {
                 self.cursor = p;
                 self.apply_drag();
             }
+            Message::ToggleTheme => self.theme_index = theme::opposite_of(self.theme_index),
+            Message::SetTheme(choice) => self.theme_index = choice.0,
             Message::ToggleSidebar => self.sidebar_visible = !self.sidebar_visible,
             Message::ToggleResponseLayout => self.response_right = !self.response_right,
             Message::DragStart(divider) => {
