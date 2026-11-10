@@ -14,6 +14,8 @@ use crate::vars;
 
 pub const RENAME_ID: &str = "oxide-rename-input";
 pub const TABS_ID: &str = "oxide-tabs";
+/// Width of a tab plus the gap before the next one (used to turn a drag distance into a position).
+pub const TAB_STRIDE: f32 = 196.0;
 pub const SEARCH_ID: &str = "oxide-search";
 
 // ───────────────────────────── UI enums ─────────────────────────────
@@ -146,6 +148,8 @@ pub struct Drag {
 
 #[derive(Debug, Clone)]
 pub enum Message {
+    TabPressed(Id),
+
     // Sidebar search
     SearchChanged(String),
 
@@ -179,7 +183,6 @@ pub enum Message {
     RenameSubmit,
 
     // Tabs
-    ActivateTab(Id),
     PinTab(Id),
     CloseTab(Id),
     TabContext(Id),
@@ -219,6 +222,14 @@ pub struct Tab {
     pub request_id: Id,
     /// `false` = preview tab (italic), replaced by the next single click.
     pub pinned: bool,
+}
+
+/// A tab being dragged to a new position.
+pub struct TabDrag {
+    pub id: Id,
+    pub start_x: f32,
+    pub start_index: usize,
+    pub moved: bool,
 }
 
 pub struct Renaming {
@@ -297,6 +308,7 @@ pub struct Oxide {
     /// Index into [`theme::ENTRIES`].
     /// Text typed in the sidebar search box (empty = show everything).
     pub search: String,
+    pub tab_drag: Option<TabDrag>,
     pub theme_index: usize,
     /// Global variables (shared by all collections).
     pub globals: Vec<KeyValue>,
@@ -342,6 +354,7 @@ impl Oxide {
             save_error,
             notice: None,
             search: String::new(),
+            tab_drag: None,
             theme_index: 0,
             globals: storage::load_globals(),
             vars_dialog: None,
@@ -622,6 +635,7 @@ impl Oxide {
         let Some(pos) = self.tabs.iter().position(|t| t.request_id == id) else {
             return;
         };
+        self.revert_request(id);
         self.tabs.remove(pos);
 
         if self.active == Some(id) {
@@ -638,6 +652,15 @@ impl Oxide {
     }
 
     fn close_other_tabs(&mut self, keep: Id) {
+        let closing: Vec<Id> = self
+            .tabs
+            .iter()
+            .map(|t| t.request_id)
+            .filter(|id| *id != keep)
+            .collect();
+        for id in closing {
+            self.revert_request(id);
+        }
         self.tabs.retain(|t| t.request_id == keep);
         if self.tabs.is_empty() {
             self.active = None;
@@ -647,6 +670,10 @@ impl Oxide {
     }
 
     fn close_all_tabs(&mut self) {
+        let closing: Vec<Id> = self.tabs.iter().map(|t| t.request_id).collect();
+        for id in closing {
+            self.revert_request(id);
+        }
         self.tabs.clear();
         self.active = None;
     }
@@ -771,6 +798,20 @@ impl Oxide {
                     self.extra = rest.iter().copied().collect();
                     self.anchor = Some(last);
                     self.persist();
+
+                    // A duplicated request opens (and becomes the active tab).
+                    let (selected, extra, anchor) =
+                        (self.selected, self.extra.clone(), self.anchor);
+                    if let Some(&request) = copies
+                        .iter()
+                        .rev()
+                        .find(|id| self.tree.request(**id).is_some())
+                    {
+                        self.open_pinned(request);
+                        self.selected = selected;
+                        self.extra = extra;
+                        self.anchor = anchor;
+                    }
                 }
             }
             MenuAction::Delete => {
@@ -968,11 +1009,6 @@ impl Oxide {
             Message::RenameSubmit => self.commit_rename(),
 
             // ── Tabs ──
-            Message::ActivateTab(id) => {
-                self.commit_rename();
-                self.menu = None;
-                self.activate(id);
-            }
             Message::TabsScrolled(delta) => {
                 // The horizontal scrollable ignores the vertical wheel axis, so
                 // translate it: wheel down/up scrolls the tabs right/left.
@@ -1067,6 +1103,7 @@ impl Oxide {
             Message::CursorMoved(p) => {
                 self.cursor = p;
                 self.apply_drag();
+                self.apply_tab_drag();
             }
             Message::OpenVariables(scope) => {
                 self.menu = None;
@@ -1095,7 +1132,23 @@ impl Oxide {
                     size,
                 });
             }
-            Message::DragEnd => self.drag = None,
+            Message::DragEnd => {
+                self.drag = None;
+                self.tab_drag = None;
+            }
+            Message::TabPressed(id) => {
+                self.commit_rename();
+                self.menu = None;
+                self.activate(id);
+                if let Some(index) = self.tabs.iter().position(|t| t.request_id == id) {
+                    self.tab_drag = Some(TabDrag {
+                        id,
+                        start_x: self.cursor.x,
+                        start_index: index,
+                        moved: false,
+                    });
+                }
+            }
             Message::WindowResized(size) => self.window_size = size,
 
             // ── Request editor ──
@@ -1399,6 +1452,50 @@ impl Oxide {
         }
         if let Some(rt) = self.runtime.get_mut(&id) {
             rt.script_output = output;
+        }
+    }
+
+    /// Moves the dragged tab to the slot under the cursor.
+    fn apply_tab_drag(&mut self) {
+        let Some(drag) = &self.tab_drag else {
+            return;
+        };
+        let dx = self.cursor.x - drag.start_x;
+        if !drag.moved && dx.abs() < 8.0 {
+            return;
+        }
+        let (id, start) = (drag.id, drag.start_index);
+
+        let last = self.tabs.len().saturating_sub(1) as f32;
+        let target = (start as f32 + (dx / TAB_STRIDE).round()).clamp(0.0, last) as usize;
+        if let Some(current) = self.tabs.iter().position(|t| t.request_id == id) {
+            if current != target {
+                let tab = self.tabs.remove(current);
+                self.tabs.insert(target, tab);
+            }
+        }
+        if let Some(drag) = &mut self.tab_drag {
+            drag.moved = true;
+        }
+    }
+
+    /// Drops the unsaved edits of a request (used when its tab is closed).
+    fn revert_request(&mut self, id: Id) {
+        let Some(saved) = self.saved.get(&id).cloned() else {
+            return;
+        };
+        let Some(req) = self.tree.request_mut(id) else {
+            return;
+        };
+        if *req == saved {
+            return;
+        }
+        *req = saved;
+
+        // The text editors keep their own copy of the text: rebuild them.
+        if let (Some(rt), Some(req)) = (self.runtime.get_mut(&id), self.tree.request(id)) {
+            rt.body_editor = text_editor::Content::with_text(&req.body_text);
+            rt.script_editor = text_editor::Content::with_text(&req.script);
         }
     }
 

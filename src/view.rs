@@ -1273,14 +1273,20 @@ impl Oxide {
                 .clip(true)
                 .style(tab_style(active));
 
-            Some(
-                mouse_area(tab_view)
-                    .on_press(Message::ActivateTab(id))
-                    .on_double_click(Message::PinTab(id))
-                    .on_middle_press(Message::CloseTab(id))
-                    .on_right_press(Message::TabContext(id))
-                    .into(),
-            )
+            let dragging = self
+                .tab_drag
+                .as_ref()
+                .is_some_and(|d| d.moved && d.id == id);
+            let area = mouse_area(tab_view)
+                .on_press(Message::TabPressed(id))
+                .on_double_click(Message::PinTab(id))
+                .on_middle_press(Message::CloseTab(id))
+                .on_right_press(Message::TabContext(id));
+            Some(if dragging {
+                area.interaction(Interaction::Grabbing).into()
+            } else {
+                area.into()
+            })
         });
 
         mouse_area(
