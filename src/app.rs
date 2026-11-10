@@ -256,6 +256,9 @@ impl Oxide {
             last_session: storage::Session::default(),
         };
         app.sync_saved();
+        // On startup only the path down to the active tab is expanded; the
+        // restored session re-expands it (see `activate`).
+        collapse_all(&mut app.tree.roots);
         app.restore_session();
         app.last_session = app.current_session();
         (app, Task::none())
@@ -1137,5 +1140,13 @@ fn collect_ids(nodes: &[Node], visible_only: bool, out: &mut Vec<Id>) {
         if !visible_only || node.expanded {
             collect_ids(&node.children, visible_only, out);
         }
+    }
+}
+
+/// Collapses every collection and folder.
+fn collapse_all(nodes: &mut [Node]) {
+    for node in nodes {
+        node.expanded = false;
+        collapse_all(&mut node.children);
     }
 }
