@@ -74,6 +74,12 @@ pub enum Edit {
     BodyKind(BodyKind),
     BodyAction(text_editor::Action),
     ScriptAction(text_editor::Action),
+    /// Tab pressed in the body editor / script editor: indent.
+    BodyTab,
+    ScriptTab,
+    /// Shift+Tab: take one indentation step back.
+    BodyUntab,
+    ScriptUntab,
     AuthKind(AuthKind),
     BearerToken(String),
     BasicUser(String),
@@ -927,6 +933,46 @@ impl Oxide {
                 }
                 return is_edit;
             }
+            Edit::BodyTab => {
+                let Some(rt) = self.runtime.get_mut(&id) else {
+                    return false;
+                };
+                let changed = indent(&mut rt.body_editor);
+                if changed {
+                    req.body_text = rt.body_editor.text();
+                }
+                return changed;
+            }
+            Edit::BodyUntab => {
+                let Some(rt) = self.runtime.get_mut(&id) else {
+                    return false;
+                };
+                let changed = unindent(&mut rt.body_editor);
+                if changed {
+                    req.body_text = rt.body_editor.text();
+                }
+                return changed;
+            }
+            Edit::ScriptUntab => {
+                let Some(rt) = self.runtime.get_mut(&id) else {
+                    return false;
+                };
+                let changed = unindent(&mut rt.script_editor);
+                if changed {
+                    req.script = rt.script_editor.text();
+                }
+                return changed;
+            }
+            Edit::ScriptTab => {
+                let Some(rt) = self.runtime.get_mut(&id) else {
+                    return false;
+                };
+                let changed = indent(&mut rt.script_editor);
+                if changed {
+                    req.script = rt.script_editor.text();
+                }
+                return changed;
+            }
             Edit::ScriptAction(action) => {
                 let is_edit = action.is_edit();
                 if let Some(rt) = self.runtime.get_mut(&id) {
@@ -1602,6 +1648,55 @@ fn table_mut(req: &mut Request, list: KvList) -> &mut Vec<KeyValue> {
         // Variables are edited through `edit_variables`, never through a request.
         KvList::Vars => &mut req.params,
     }
+}
+
+/// Spaces inserted by Tab in the code editors.
+const INDENT: usize = 4;
+
+/// Inserts one indentation step at the cursor. With a selection nothing happens
+/// (typing would replace the selected text). Returns whether the text changed.
+fn indent(content: &mut text_editor::Content) -> bool {
+    if content.selection().is_some_and(|s| !s.is_empty()) {
+        return false;
+    }
+    for _ in 0..INDENT {
+        content.perform(text_editor::Action::Edit(text_editor::Edit::Insert(' ')));
+    }
+    true
+}
+
+/// Removes up to one indentation step of spaces directly before the cursor
+/// (what Tab inserted). Returns whether the text changed.
+fn unindent(content: &mut text_editor::Content) -> bool {
+    use text_editor::{Action, Edit, Motion};
+
+    if content.selection().is_some_and(|s| !s.is_empty()) {
+        return false;
+    }
+
+    // Select to the left one character at a time, as long as it is a space.
+    let mut spaces = 0;
+    for _ in 0..INDENT {
+        content.perform(Action::Select(Motion::Left));
+        let selected = content.selection().unwrap_or_default();
+
+        if selected.chars().count() == spaces + 1 && selected.chars().all(|c| c == ' ') {
+            spaces += 1;
+        } else if selected.chars().count() == spaces {
+            // The cursor could not move (start of the text).
+            break;
+        } else {
+            // Not a space (or a line break): step back over it.
+            content.perform(Action::Select(Motion::Right));
+            break;
+        }
+    }
+
+    if spaces == 0 {
+        return false;
+    }
+    content.perform(Action::Edit(Edit::Backspace));
+    true
 }
 
 fn is_variables_edit(edit: &Edit) -> bool {

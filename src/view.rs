@@ -289,6 +289,32 @@ fn tab_style(active: bool) -> impl Fn(&Theme) -> container::Style {
 
 // ───────────────────────────── small builders ─────────────────────────────
 
+/// Key bindings for a code editor: Tab indents and Shift+Tab takes the indentation back
+/// (instead of moving the focus away); every other key behaves as usual.
+fn tab_indents(
+    indent: Edit,
+    unindent: Edit,
+) -> impl Fn(text_editor::KeyPress) -> Option<text_editor::Binding<Message>> {
+    move |key_press| {
+        let is_tab = matches!(
+            key_press.key.as_ref(),
+            iced::keyboard::Key::Named(iced::keyboard::key::Named::Tab)
+        );
+        let focused = matches!(key_press.status, text_editor::Status::Focused { .. });
+
+        if is_tab && focused {
+            let edit = if key_press.modifiers.shift() {
+                unindent.clone()
+            } else {
+                indent.clone()
+            };
+            Some(text_editor::Binding::Custom(Message::Edit(edit)))
+        } else {
+            text_editor::Binding::from_key_press(key_press)
+        }
+    }
+}
+
 /// A "+" drawn from two bars, so it is exactly centred (a text glyph sits low).
 fn plus_icon<'a>() -> Element<'a, Message> {
     let bar = |width: f32, height: f32| {
@@ -1475,6 +1501,7 @@ impl Oxide {
                     .style(editor_style)
                     .placeholder(placeholder)
                     .on_action(|a| Message::Edit(Edit::BodyAction(a)))
+                    .key_binding(tab_indents(Edit::BodyTab, Edit::BodyUntab))
                     .font(Font::MONOSPACE)
                     .size(13)
                     .padding(10)
@@ -1504,6 +1531,7 @@ impl Oxide {
             .style(editor_style)
             .placeholder("token = body.access_token")
             .on_action(|a| Message::Edit(Edit::ScriptAction(a)))
+            .key_binding(tab_indents(Edit::ScriptTab, Edit::ScriptUntab))
             .font(Font::MONOSPACE)
             .size(13)
             .padding(10)
