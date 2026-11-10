@@ -265,8 +265,8 @@ impl Oxide {
         if let Some(menu) = &self.menu {
             layers = layers.push(self.menu_overlay(menu));
         }
-        if let Some(id) = self.confirm_delete {
-            if let Some(dialog) = self.delete_dialog(id) {
+        if let Some(ids) = &self.confirm_delete {
+            if let Some(dialog) = self.delete_dialog(ids) {
                 layers = layers.push(dialog);
             }
         }
@@ -343,7 +343,7 @@ impl Oxide {
 
     fn node_row<'a>(&'a self, node: &'a Node, depth: usize) -> Element<'a, Message> {
         let id = node.id;
-        let selected = self.selected == Some(id);
+        let selected = self.is_selected(id);
         let hovered = self.hovered == Some(id);
 
         let lead: Element<'a, Message> = match &node.kind {
@@ -533,32 +533,57 @@ impl Oxide {
 
     // ───────────────────────── delete confirmation ─────────────────────────
 
-    fn delete_dialog(&self, id: Id) -> Option<Element<'_, Message>> {
-        let node = self.tree.get(id)?;
+    fn delete_dialog(&self, ids: &[Id]) -> Option<Element<'_, Message>> {
+        let plural = |n: usize| if n == 1 { "" } else { "s" };
 
-        let (what, detail) = match node.kind {
-            Kind::Request(_) => ("request", String::from("This action cannot be undone.")),
-            Kind::Folder | Kind::Collection => {
-                let count = node.request_ids().len();
-                let what = if matches!(node.kind, Kind::Folder) {
-                    "folder"
-                } else {
-                    "collection"
-                };
-                (
-                    what,
-                    format!(
-                        "It contains {count} request{}. Everything inside will be deleted. This action cannot be undone.",
-                        if count == 1 { "" } else { "s" }
-                    ),
-                )
-            }
+        let (title, headline, detail) = if let [id] = ids {
+            let node = self.tree.get(*id)?;
+            let (what, detail) = match node.kind {
+                Kind::Request(_) => ("request", String::from("This action cannot be undone.")),
+                Kind::Folder | Kind::Collection => {
+                    let count = node.request_ids().len();
+                    let what = if matches!(node.kind, Kind::Folder) {
+                        "folder"
+                    } else {
+                        "collection"
+                    };
+                    (
+                        what,
+                        format!(
+                            "It contains {count} request{}. Everything inside will be deleted. This action cannot be undone.",
+                            plural(count)
+                        ),
+                    )
+                }
+            };
+            (
+                format!("Delete {what}?"),
+                format!("\"{}\" will be permanently deleted.", node.name),
+                detail,
+            )
+        } else {
+            let requests: usize = ids
+                .iter()
+                .filter_map(|id| self.tree.get(*id))
+                .map(|n| n.request_ids().len())
+                .sum();
+            (
+                format!("Delete {} items?", ids.len()),
+                format!(
+                    "The {} selected items will be permanently deleted.",
+                    ids.len()
+                ),
+                format!(
+                    "They contain {requests} request{} in total. This action cannot be undone.",
+                    plural(requests)
+                ),
+            )
         };
 
         let card = container(
             column![
-                text(format!("Delete {what}?")).size(17).font(BOLD),
-                text(format!("\"{}\" will be permanently deleted.", node.name)).size(13),
+                text(title).size(17).font(BOLD),
+                text(headline).size(13),
                 text(detail).size(13).style(muted),
                 space().height(6),
                 row![
@@ -645,6 +670,8 @@ impl Oxide {
                     .size(14)
                     .style(muted),
                 space().height(16),
+                hint("Shift+Click", "Select a range"),
+                hint("Ctrl+Click", "Add to selection"),
                 hint("Ctrl+N", "New request"),
                 hint("Ctrl+Shift+N", "New folder"),
                 hint("Ctrl+S", "Save request"),

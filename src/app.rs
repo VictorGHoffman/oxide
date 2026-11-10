@@ -137,6 +137,7 @@ pub enum Message {
     Shortcut(Shortcut),
 
     // Window-level events
+    ModifiersChanged(keyboard::Modifiers),
     CursorMoved(Point),
     WindowResized(Size),
 
@@ -215,9 +216,15 @@ pub struct Oxide {
     pub window_size: Size,
     /// Last saved version of every request (what is on disk).
     pub saved: HashMap<Id, Request>,
-    /// Node waiting for the user to confirm its deletion.
-    pub confirm_delete: Option<Id>,
+    /// Nodes waiting for the user to confirm their deletion.
+    pub confirm_delete: Option<Vec<Id>>,
     pub save_error: Option<String>,
+    /// Selected nodes besides the primary one (`selected`).
+    pub extra: HashSet<Id>,
+    /// Where a Shift+click range starts.
+    pub anchor: Option<Id>,
+    pub modifiers: keyboard::Modifiers,
+    last_session: storage::Session,
 }
 
 impl Oxide {
@@ -243,9 +250,152 @@ impl Oxide {
             saved: HashMap::new(),
             confirm_delete: None,
             save_error,
+            extra: HashSet::new(),
+            anchor: selected,
+            modifiers: keyboard::Modifiers::default(),
+            last_session: storage::Session::default(),
         };
         app.sync_saved();
+        app.restore_session();
+        app.last_session = app.current_session();
         (app, Task::none())
+    }
+
+    // ───────────────────────── session ─────────────────────────
+
+    fn current_session(&self) -> storage::Session {
+        storage::Session {
+            tabs: self
+                .tabs
+                .iter()
+                .map(|t| storage::SessionTab {
+                    id: t.request_id,
+                    pinned: t.pinned,
+                })
+                .collect(),
+            active: self.active,
+        }
+    }
+
+    /// Reopens the tabs that were open last time (skipping deleted requests).
+    fn restore_session(&mut self) {
+        let Some(session) = storage::load_session() else {
+            return;
+        };
+        for tab in session.tabs {
+            let exists = self.tree.request(tab.id).is_some();
+            let duplicate = self.tabs.iter().any(|t| t.request_id == tab.id);
+            if exists && !duplicate {
+                self.ensure_runtime(tab.id);
+                self.tabs.push(Tab {
+                    request_id: tab.id,
+                    pinned: tab.pinned,
+                });
+            }
+        }
+        let active = session
+            .active
+            .filter(|id| self.tabs.iter().any(|t| t.request_id == *id))
+            .or_else(|| self.tabs.last().map(|t| t.request_id));
+        if let Some(id) = active {
+            self.activate(id);
+        }
+    }
+
+    /// Called after every message: the open tabs are written whenever they
+    /// change, so they survive any way of closing the app (or a crash).
+    fn sync_session(&mut self) {
+        let session = self.current_session();
+        if session != self.last_session {
+            if let Err(e) = storage::save_session(&session) {
+                self.save_error = Some(e);
+            }
+            self.last_session = session;
+        }
+    }
+
+    // ───────────────────────── selection ─────────────────────────
+
+    pub fn is_selected(&self, id: Id) -> bool {
+        self.selected == Some(id) || self.extra.contains(&id)
+    }
+
+    /// Selected nodes in tree order.
+    fn selected_ids(&self) -> Vec<Id> {
+        let mut out = Vec::new();
+        collect_ids(&self.tree.roots, false, &mut out);
+        out.retain(|id| self.is_selected(*id));
+        out
+    }
+
+    fn select_only(&mut self, id: Id) {
+        self.selected = Some(id);
+        self.extra.clear();
+        self.anchor = Some(id);
+    }
+
+    /// Shift+click: everything visible between the anchor and `id`.
+    fn select_range(&mut self, id: Id) {
+        let mut visible = Vec::new();
+        collect_ids(&self.tree.roots, true, &mut visible);
+
+        let from = self
+            .anchor
+            .and_then(|a| visible.iter().position(|v| *v == a));
+        let to = visible.iter().position(|v| *v == id);
+
+        match (from, to) {
+            (Some(a), Some(b)) => {
+                let (lo, hi) = (a.min(b), a.max(b));
+                self.extra = visible[lo..=hi].iter().copied().collect();
+                self.extra.remove(&id);
+                self.selected = Some(id);
+            }
+            _ => self.select_only(id),
+        }
+    }
+
+    /// Ctrl/Cmd+click: add or remove a single node.
+    fn toggle_selection(&mut self, id: Id) {
+        if self.is_selected(id) {
+            if self.selected == Some(id) {
+                let promoted = self.extra.iter().next().copied();
+                if let Some(p) = promoted {
+                    self.extra.remove(&p);
+                }
+                self.selected = promoted;
+            } else {
+                self.extra.remove(&id);
+            }
+        } else {
+            if let Some(prev) = self.selected {
+                self.extra.insert(prev);
+            }
+            self.selected = Some(id);
+            self.anchor = Some(id);
+        }
+    }
+
+    /// The nodes an action applies to. Nested selections (a folder and one
+    /// of its children) are reduced to the outermost nodes.
+    fn action_targets(&self, target: Option<Id>) -> Vec<Id> {
+        let ids = match target {
+            Some(t) if self.is_selected(t) => self.selected_ids(),
+            Some(t) => vec![t],
+            None => {
+                let selected = self.selected_ids();
+                if selected.is_empty() {
+                    self.active.into_iter().collect()
+                } else {
+                    selected
+                }
+            }
+        };
+        let set: HashSet<Id> = ids.iter().copied().collect();
+        ids.into_iter()
+            .filter(|id| self.tree.get(*id).is_some())
+            .filter(|id| !self.tree.ancestors(*id).iter().any(|a| set.contains(a)))
+            .collect()
     }
 
     // ───────────────────────── saving ─────────────────────────
@@ -318,7 +468,7 @@ impl Oxide {
     fn activate(&mut self, id: Id) {
         self.ensure_runtime(id);
         self.active = Some(id);
-        self.selected = Some(id);
+        self.select_only(id);
         self.tree.expand_ancestors(id);
     }
 
@@ -452,8 +602,19 @@ impl Oxide {
         if self.renaming.as_ref().is_some_and(|r| r.id == id) {
             self.renaming = None;
         }
-        if self.selected.is_some_and(|s| self.tree.get(s).is_none()) {
+        let tree = &self.tree;
+        self.extra.retain(|id| tree.get(*id).is_some());
+        if self.selected.is_some_and(|s| tree.get(s).is_none()) {
             self.selected = None;
+        }
+        if self.selected.is_none() {
+            self.selected = self.extra.iter().next().copied();
+            if let Some(s) = self.selected {
+                self.extra.remove(&s);
+            }
+        }
+        if self.anchor.is_some_and(|a| self.tree.get(a).is_none()) {
+            self.anchor = self.selected;
         }
         self.hovered = None;
     }
@@ -488,18 +649,24 @@ impl Oxide {
                 }
             }
             MenuAction::Duplicate => {
-                if let Some(id) = node_target {
-                    if let Some(copy) = self.tree.duplicate(id) {
-                        self.selected = Some(copy);
-                        self.persist();
-                    }
+                let targets = self.action_targets(target);
+                let copies: Vec<Id> = targets
+                    .into_iter()
+                    .filter_map(|id| self.tree.duplicate(id))
+                    .collect();
+                if let Some((&last, rest)) = copies.split_last() {
+                    self.selected = Some(last);
+                    self.extra = rest.iter().copied().collect();
+                    self.anchor = Some(last);
+                    self.persist();
                 }
             }
             MenuAction::Delete => {
                 // Never delete directly: ask first.
-                if let Some(id) = node_target.filter(|&id| self.tree.get(id).is_some()) {
+                let targets = self.action_targets(target);
+                if !targets.is_empty() {
                     self.commit_rename();
-                    self.confirm_delete = Some(id);
+                    self.confirm_delete = Some(targets);
                 }
             }
             MenuAction::CloseTab => {
@@ -579,21 +746,37 @@ impl Oxide {
     // ───────────────────────── update ─────────────────────────
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        let task = self.handle_message(message);
+        self.sync_session();
+        task
+    }
+
+    fn handle_message(&mut self, message: Message) -> Task<Message> {
         match message {
             // ── Sidebar ──
             Message::SelectNode(id) => {
                 self.commit_rename();
                 self.menu = None;
-                self.selected = Some(id);
 
-                let is_request = self.tree.get(id).is_some_and(|n| !n.is_container());
-                if is_request {
-                    self.open_preview(id);
-                } else if let Some(node) = self.tree.get_mut(id) {
-                    node.expanded = !node.expanded;
+                if self.modifiers.shift() && self.anchor.is_some() {
+                    self.select_range(id);
+                } else if self.modifiers.command() {
+                    self.toggle_selection(id);
+                } else {
+                    self.select_only(id);
+
+                    let is_request = self.tree.get(id).is_some_and(|n| !n.is_container());
+                    if is_request {
+                        self.open_preview(id);
+                    } else if let Some(node) = self.tree.get_mut(id) {
+                        node.expanded = !node.expanded;
+                    }
                 }
             }
             Message::OpenPinned(id) => {
+                if self.modifiers.shift() || self.modifiers.command() {
+                    return Task::none();
+                }
                 let is_request = self.tree.get(id).is_some_and(|n| !n.is_container());
                 if is_request {
                     self.open_pinned(id);
@@ -606,7 +789,11 @@ impl Oxide {
             Message::HoverNode(id) => self.hovered = id,
             Message::NodeContext(id) => {
                 self.commit_rename();
-                self.selected = Some(id);
+                // Right-clicking inside a multi-selection keeps it, so the
+                // menu acts on all selected items.
+                if !self.is_selected(id) {
+                    self.select_only(id);
+                }
                 self.menu = Some(ContextMenu {
                     target: MenuTarget::Node(id),
                     position: self.cursor,
@@ -671,8 +858,10 @@ impl Oxide {
                 };
             }
             Message::ConfirmDelete => {
-                if let Some(id) = self.confirm_delete.take() {
-                    self.delete_node(id);
+                if let Some(ids) = self.confirm_delete.take() {
+                    for id in ids {
+                        self.delete_node(id);
+                    }
                     self.persist();
                 }
             }
@@ -684,6 +873,7 @@ impl Oxide {
             }
 
             // ── Window events ──
+            Message::ModifiersChanged(m) => self.modifiers = m,
             Message::CursorMoved(p) => self.cursor = p,
             Message::WindowResized(size) => self.window_size = size,
 
@@ -801,7 +991,11 @@ impl Oxide {
                 }
                 Task::none()
             }
-            Shortcut::Escape | Shortcut::Confirm => Task::none(),
+            Shortcut::Escape => {
+                self.extra.clear();
+                Task::none()
+            }
+            Shortcut::Confirm => Task::none(),
             Shortcut::Save => {
                 self.save_active();
                 Task::none()
@@ -865,6 +1059,7 @@ fn keep_trailing_blank(table: &mut Vec<KeyValue>) {
 /// Translates raw window events into messages.
 fn handle_event(event: Event, status: event::Status, _window: window::Id) -> Option<Message> {
     match event {
+        Event::Keyboard(keyboard::Event::ModifiersChanged(m)) => Some(Message::ModifiersChanged(m)),
         Event::Mouse(mouse::Event::CursorMoved { position }) => {
             Some(Message::CursorMoved(position))
         }
@@ -932,4 +1127,15 @@ fn starter_tree() -> Tree {
         node.name = "My Collection".into();
     }
     tree
+}
+
+/// Ids of all nodes in tree order; with `visible_only`, children of
+/// collapsed containers are skipped.
+fn collect_ids(nodes: &[Node], visible_only: bool, out: &mut Vec<Id>) {
+    for node in nodes {
+        out.push(node.id);
+        if !visible_only || node.expanded {
+            collect_ids(&node.children, visible_only, out);
+        }
+    }
 }
