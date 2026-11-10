@@ -1,6 +1,7 @@
 //! All widgets. Everything here is read-only over the application state.
 
 use iced::font::{self, Font};
+use iced::mouse::Interaction;
 use iced::widget::{
     button, checkbox, column, container, mouse_area, opaque, pick_list, radio, row, scrollable,
     space, stack, text, text_editor, text_input, Column, Row,
@@ -241,6 +242,36 @@ fn vline<'a>() -> Element<'a, Message> {
         .into()
 }
 
+/// A draggable border: a 1px line with a wider invisible grab area.
+fn divider<'a>(which: Divider, vertical: bool) -> Element<'a, Message> {
+    let (line, cursor): (Element<'a, Message>, _) = if vertical {
+        (
+            container(vline())
+                .width(GRAB)
+                .height(Fill)
+                .align_x(iced::Center)
+                .into(),
+            Interaction::ResizingHorizontally,
+        )
+    } else {
+        (
+            container(hline())
+                .width(Fill)
+                .height(GRAB)
+                .align_y(iced::Center)
+                .into(),
+            Interaction::ResizingVertically,
+        )
+    };
+    mouse_area(line)
+        .on_press(Message::DragStart(which))
+        .interaction(cursor)
+        .into()
+}
+
+/// Width (or height) of the area where a divider can be grabbed.
+const GRAB: f32 = 6.0;
+
 fn centered<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
     container(content).center(Fill).into()
 }
@@ -259,7 +290,16 @@ fn labeled<'a>(
 
 impl Oxide {
     pub fn view(&self) -> Element<'_, Message> {
-        let body = row![self.sidebar(), vline(), self.main_area()];
+        let body: Element<'_, Message> = if self.sidebar_visible {
+            row![
+                self.sidebar(),
+                divider(Divider::Sidebar, true),
+                self.main_area()
+            ]
+            .into()
+        } else {
+            row![self.collapsed_sidebar(), vline(), self.main_area()].into()
+        };
 
         let mut layers = stack![body];
         if let Some(menu) = &self.menu {
@@ -279,6 +319,10 @@ impl Oxide {
         let header = row![
             text("COLLECTIONS").size(11).font(BOLD).style(muted),
             space().width(Fill),
+            button(text("«").size(14))
+                .padding(Padding::from([0, 6]))
+                .style(icon_button_style)
+                .on_press(Message::ToggleSidebar),
             button(text("Import").size(11))
                 .padding(Padding::from([2, 8]))
                 .style(icon_button_style)
@@ -347,11 +391,30 @@ impl Oxide {
             );
         }
 
+        let width = self.sidebar_width.clamp(
+            MIN_SIDEBAR,
+            (self.window_size.width - 320.0).clamp(MIN_SIDEBAR, MAX_SIDEBAR),
+        );
         container(sidebar)
-            .width(280)
+            .width(width)
             .height(Fill)
             .style(sidebar_style)
             .into()
+    }
+
+    /// The thin strip left when the sidebar is hidden, with a button to bring it back.
+    fn collapsed_sidebar(&self) -> Element<'_, Message> {
+        container(
+            button(text("»").size(14))
+                .padding(Padding::from([2, 6]))
+                .style(icon_button_style)
+                .on_press(Message::ToggleSidebar),
+        )
+        .padding(Padding::from([8, 4]))
+        .width(32)
+        .height(Fill)
+        .style(sidebar_style)
+        .into()
     }
 
     fn push_rows<'a>(
@@ -677,27 +740,73 @@ impl Oxide {
             return self.empty_state();
         };
 
-        container(column![
-            self.tab_bar(),
-            hline(),
-            container(
-                column![
-                    self.url_bar(req, rt),
-                    self.section_bar(req, rt),
-                    container(self.section_content(req, rt)).height(Length::FillPortion(1)),
-                ]
-                .spacing(10)
-                .padding(12)
-            )
-            .height(Length::FillPortion(1)),
-            hline(),
-            container(self.response_panel(rt))
-                .padding(12)
-                .height(Length::FillPortion(1)),
-        ])
+        let editor = container(
+            column![
+                self.url_bar(req, rt),
+                self.section_bar(req, rt),
+                container(self.section_content(req, rt)).height(Length::FillPortion(1)),
+            ]
+            .spacing(10)
+            .padding(12),
+        )
         .width(Fill)
-        .height(Fill)
-        .into()
+        .height(Fill);
+
+        let toggle_label = if self.response_right {
+            "Dock bottom"
+        } else {
+            "Dock right"
+        };
+        let response_bar = row![
+            space().width(Fill),
+            button(text(toggle_label).size(12))
+                .padding(Padding::from([2, 8]))
+                .style(icon_button_style)
+                .on_press(Message::ToggleResponseLayout),
+        ]
+        .padding(Padding::from([4, 12]));
+        let response = column![
+            response_bar,
+            container(self.response_panel(rt))
+                .padding(Padding::from([0, 12]).bottom(12.0))
+                .height(Fill),
+        ];
+
+        let content: Element<'_, Message> = if self.response_right {
+            let sidebar = if self.sidebar_visible {
+                self.sidebar_width
+            } else {
+                32.0
+            };
+            let width = self.response_width.clamp(
+                MIN_RESPONSE_WIDTH,
+                (self.window_size.width - sidebar - 320.0).max(MIN_RESPONSE_WIDTH),
+            );
+            row![
+                editor,
+                divider(Divider::Response, true),
+                container(response).width(width).height(Fill),
+            ]
+            .height(Fill)
+            .into()
+        } else {
+            let height = self.response_height.clamp(
+                MIN_RESPONSE_HEIGHT,
+                (self.window_size.height - 280.0).max(MIN_RESPONSE_HEIGHT),
+            );
+            column![
+                editor,
+                divider(Divider::Response, false),
+                container(response).height(height).width(Fill),
+            ]
+            .height(Fill)
+            .into()
+        };
+
+        container(column![self.tab_bar(), hline(), content])
+            .width(Fill)
+            .height(Fill)
+            .into()
     }
 
     fn empty_state(&self) -> Element<'_, Message> {
@@ -726,6 +835,7 @@ impl Oxide {
                 hint("Ctrl+N", "New request"),
                 hint("Ctrl+Shift+N", "New folder"),
                 hint("Ctrl+S", "Save request"),
+                hint("Ctrl+B", "Show / hide sidebar"),
                 hint("Ctrl+D", "Duplicate"),
                 hint("F2", "Rename"),
                 hint("Del", "Delete"),

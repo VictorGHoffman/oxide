@@ -109,10 +109,33 @@ pub enum Shortcut {
     Confirm,
     FocusNext,
     FocusPrevious,
+    ToggleSidebar,
+}
+
+/// A draggable border between two panels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Divider {
+    /// Between the sidebar and the request area.
+    Sidebar,
+    /// Between the request editor and the response.
+    Response,
+}
+
+/// A divider being dragged: where the cursor and the panel size were when it started.
+pub struct Drag {
+    pub divider: Divider,
+    pub start: Point,
+    pub size: f32,
 }
 
 #[derive(Debug, Clone)]
 pub enum Message {
+    // Layout
+    ToggleSidebar,
+    ToggleResponseLayout,
+    DragStart(Divider),
+    DragEnd,
+
     // Import / export
     /// `(file name, file contents)` for every file picked; empty when cancelled.
     ImportPicked(Result<Vec<(String, String)>, String>),
@@ -219,6 +242,11 @@ pub struct Notice {
     pub error: bool,
 }
 
+pub const MIN_SIDEBAR: f32 = 180.0;
+pub const MAX_SIDEBAR: f32 = 600.0;
+pub const MIN_RESPONSE_WIDTH: f32 = 260.0;
+pub const MIN_RESPONSE_HEIGHT: f32 = 120.0;
+
 pub struct Oxide {
     pub tree: Tree,
     pub selected: Option<Id>,
@@ -236,6 +264,13 @@ pub struct Oxide {
     pub confirm_delete: Option<Vec<Id>>,
     pub save_error: Option<String>,
     pub notice: Option<Notice>,
+    pub sidebar_visible: bool,
+    pub sidebar_width: f32,
+    /// `true` = response docked on the right, `false` = below the editor.
+    pub response_right: bool,
+    pub response_height: f32,
+    pub response_width: f32,
+    pub drag: Option<Drag>,
     /// Selected nodes besides the primary one (`selected`).
     pub extra: HashSet<Id>,
     /// Where a Shift+click range starts.
@@ -268,6 +303,12 @@ impl Oxide {
             confirm_delete: None,
             save_error,
             notice: None,
+            sidebar_visible: true,
+            sidebar_width: 280.0,
+            response_right: false,
+            response_height: 320.0,
+            response_width: 480.0,
+            drag: None,
             extra: HashSet::new(),
             anchor: selected,
             modifiers: keyboard::Modifiers::default(),
@@ -957,7 +998,26 @@ impl Oxide {
 
             // ── Window events ──
             Message::ModifiersChanged(m) => self.modifiers = m,
-            Message::CursorMoved(p) => self.cursor = p,
+            Message::CursorMoved(p) => {
+                self.cursor = p;
+                self.apply_drag();
+            }
+            Message::ToggleSidebar => self.sidebar_visible = !self.sidebar_visible,
+            Message::ToggleResponseLayout => self.response_right = !self.response_right,
+            Message::DragStart(divider) => {
+                self.menu = None;
+                let size = match divider {
+                    Divider::Sidebar => self.sidebar_width,
+                    Divider::Response if self.response_right => self.response_width,
+                    Divider::Response => self.response_height,
+                };
+                self.drag = Some(Drag {
+                    divider,
+                    start: self.cursor,
+                    size,
+                });
+            }
+            Message::DragEnd => self.drag = None,
             Message::WindowResized(size) => self.window_size = size,
 
             // ── Request editor ──
@@ -1083,8 +1143,44 @@ impl Oxide {
                 self.save_active();
                 Task::none()
             }
+            Shortcut::ToggleSidebar => {
+                self.sidebar_visible = !self.sidebar_visible;
+                Task::none()
+            }
             Shortcut::FocusNext => operation::focus_next(),
             Shortcut::FocusPrevious => operation::focus_previous(),
+        }
+    }
+
+    /// Resizes the panel whose border is being dragged.
+    fn apply_drag(&mut self) {
+        let Some(drag) = &self.drag else {
+            return;
+        };
+        let dx = self.cursor.x - drag.start.x;
+        let dy = self.cursor.y - drag.start.y;
+        let window = self.window_size;
+
+        match drag.divider {
+            // The sidebar grows when dragged to the right.
+            Divider::Sidebar => {
+                let max = (window.width - 320.0).clamp(MIN_SIDEBAR, MAX_SIDEBAR);
+                self.sidebar_width = (drag.size + dx).clamp(MIN_SIDEBAR, max);
+            }
+            // The response grows when dragged away from the editor (left / up).
+            Divider::Response if self.response_right => {
+                let sidebar = if self.sidebar_visible {
+                    self.sidebar_width
+                } else {
+                    0.0
+                };
+                let max = (window.width - sidebar - 320.0).max(MIN_RESPONSE_WIDTH);
+                self.response_width = (drag.size - dx).clamp(MIN_RESPONSE_WIDTH, max);
+            }
+            Divider::Response => {
+                let max = (window.height - 280.0).max(MIN_RESPONSE_HEIGHT);
+                self.response_height = (drag.size - dy).clamp(MIN_RESPONSE_HEIGHT, max);
+            }
         }
     }
 
@@ -1146,6 +1242,7 @@ fn handle_event(event: Event, status: event::Status, _window: window::Id) -> Opt
         Event::Mouse(mouse::Event::CursorMoved { position }) => {
             Some(Message::CursorMoved(position))
         }
+        Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => Some(Message::DragEnd),
         Event::Window(window::Event::Resized(size)) => Some(Message::WindowResized(size)),
         Event::Keyboard(keyboard::Event::KeyPressed {
             key,
@@ -1198,6 +1295,7 @@ fn shortcut_for(
         ('d', false) => Some(Shortcut::Duplicate),
         ('w', false) => Some(Shortcut::CloseTab),
         ('s', false) => Some(Shortcut::Save),
+        ('b', false) => Some(Shortcut::ToggleSidebar),
         (c @ '1'..='9', false) => Some(Shortcut::GoToTab(c as usize - '1' as usize)),
         _ => None,
     }

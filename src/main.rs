@@ -31,6 +31,7 @@ fn main() -> iced::Result {
         .subscription(Oxide::subscription)
         .window(window::Settings {
             size: Size::new(1280.0, 800.0),
+            min_size: Some(Size::new(900.0, 600.0)),
             position: window::Position::Centered,
             icon: window_icon(),
             ..window::Settings::default()
