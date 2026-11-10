@@ -1,12 +1,15 @@
 //! Data model: the collection tree and the request definition.
 
+use std::collections::HashMap;
 use std::fmt;
+
+use serde::{Deserialize, Serialize};
 
 pub type Id = u64;
 
 // ───────────────────────────── Request ─────────────────────────────
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum Method {
     #[default]
     Get,
@@ -57,7 +60,7 @@ impl fmt::Display for Method {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeyValue {
     pub enabled: bool,
     pub key: String,
@@ -83,7 +86,7 @@ pub fn blank_table() -> Vec<KeyValue> {
     vec![KeyValue::empty()]
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum BodyKind {
     #[default]
     None,
@@ -116,7 +119,7 @@ impl BodyKind {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum AuthKind {
     #[default]
     None,
@@ -145,7 +148,7 @@ impl fmt::Display for AuthKind {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum ApiKeyLocation {
     #[default]
     Header,
@@ -165,7 +168,8 @@ impl fmt::Display for ApiKeyLocation {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Request {
     pub method: Method,
     pub url: String,
@@ -219,14 +223,14 @@ pub fn active_count(rows: &[KeyValue]) -> usize {
 
 // ───────────────────────────── Tree ─────────────────────────────
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Kind {
     Collection,
     Folder,
     Request(Box<Request>),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Node {
     pub id: Id,
     pub name: String,
@@ -271,7 +275,7 @@ impl Node {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Tree {
     pub roots: Vec<Node>,
     next_id: Id,
@@ -395,6 +399,40 @@ impl Tree {
         } else {
             self.parent_of(id).flatten()
         }
+    }
+
+    /// Every request in the tree, depth first.
+    pub fn requests(&self) -> Vec<(Id, &Request)> {
+        fn walk<'a>(nodes: &'a [Node], out: &mut Vec<(Id, &'a Request)>) {
+            for node in nodes {
+                if let Some(req) = node.request() {
+                    out.push((node.id, req));
+                }
+                walk(&node.children, out);
+            }
+        }
+        let mut out = Vec::new();
+        walk(&self.roots, &mut out);
+        out
+    }
+
+    /// A copy of the tree where every request holds its *saved* content, so
+    /// unsaved edits never reach the disk until the user presses Ctrl+S.
+    pub fn snapshot(&self, saved: &HashMap<Id, Request>) -> Tree {
+        fn apply(nodes: &mut [Node], saved: &HashMap<Id, Request>) {
+            for node in nodes {
+                let id = node.id;
+                if let Some(req) = node.request_mut() {
+                    if let Some(version) = saved.get(&id) {
+                        *req = version.clone();
+                    }
+                }
+                apply(&mut node.children, saved);
+            }
+        }
+        let mut copy = self.clone();
+        apply(&mut copy.roots, saved);
+        copy
     }
 
     pub fn first_collection(&self) -> Option<Id> {

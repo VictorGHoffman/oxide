@@ -1,12 +1,13 @@
 //! Application state, messages and the `update` logic.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use iced::widget::{operation, text_editor};
 use iced::{event, keyboard, mouse, window, Event, Point, Size, Subscription, Task, Theme};
 
 use crate::http;
 use crate::model::*;
+use crate::storage;
 
 pub const RENAME_ID: &str = "oxide-rename-input";
 
@@ -100,6 +101,8 @@ pub enum Shortcut {
     CloseTab,
     GoToTab(usize),
     Escape,
+    Save,
+    Confirm,
     FocusNext,
     FocusPrevious,
 }
@@ -121,6 +124,10 @@ pub enum Message {
     PinTab(Id),
     CloseTab(Id),
     TabContext(Id),
+
+    // Delete confirmation
+    ConfirmDelete,
+    CancelDelete,
 
     // Context menu / shortcuts
     MenuAction(MenuAction),
@@ -204,36 +211,84 @@ pub struct Oxide {
     pub menu: Option<ContextMenu>,
     pub cursor: Point,
     pub window_size: Size,
+    /// Last saved version of every request (what is on disk).
+    pub saved: HashMap<Id, Request>,
+    /// Node waiting for the user to confirm its deletion.
+    pub confirm_delete: Option<Id>,
+    pub save_error: Option<String>,
 }
 
 impl Oxide {
     pub fn new() -> (Self, Task<Message>) {
-        let mut tree = Tree::new();
-        let first = tree.add_collection();
-        if let Some(node) = tree.get_mut(first) {
-            node.name = "My Collection".into();
-        }
+        let (tree, save_error) = match storage::load() {
+            Ok(Some(tree)) => (tree, None),
+            Ok(None) => (starter_tree(), None),
+            Err(e) => (starter_tree(), Some(e)),
+        };
+        let selected = tree.first_collection();
 
-        (
-            Self {
-                tree,
-                selected: Some(first),
-                hovered: None,
-                renaming: None,
-                tabs: Vec::new(),
-                active: None,
-                runtime: HashMap::new(),
-                menu: None,
-                cursor: Point::ORIGIN,
-                window_size: Size::new(1280.0, 800.0),
-            },
-            Task::none(),
-        )
+        let mut app = Self {
+            tree,
+            selected,
+            hovered: None,
+            renaming: None,
+            tabs: Vec::new(),
+            active: None,
+            runtime: HashMap::new(),
+            menu: None,
+            cursor: Point::ORIGIN,
+            window_size: Size::new(1280.0, 800.0),
+            saved: HashMap::new(),
+            confirm_delete: None,
+            save_error,
+        };
+        app.sync_saved();
+        (app, Task::none())
+    }
+
+    // ───────────────────────── saving ─────────────────────────
+
+    /// Requests that have unsaved edits (their live content differs from disk).
+    pub fn is_dirty(&self, id: Id) -> bool {
+        match (self.tree.request(id), self.saved.get(&id)) {
+            (Some(current), Some(saved)) => current != saved,
+            _ => false,
+        }
+    }
+
+    /// New requests count as saved as they are; deleted ones are forgotten.
+    fn sync_saved(&mut self) {
+        let mut live = HashSet::new();
+        for (id, req) in self.tree.requests() {
+            live.insert(id);
+            self.saved.entry(id).or_insert_with(|| req.clone());
+        }
+        self.saved.retain(|id, _| live.contains(id));
+    }
+
+    /// Writes the tree (with each request's *saved* content) to disk.
+    fn persist(&mut self) {
+        self.sync_saved();
+        let snapshot = self.tree.snapshot(&self.saved);
+        self.save_error = storage::save(&snapshot).err();
+    }
+
+    /// Ctrl+S: save the request in the active tab.
+    fn save_active(&mut self) {
+        if let Some(id) = self.active {
+            if let Some(req) = self.tree.request(id).cloned() {
+                self.saved.insert(id, req);
+                self.persist();
+            }
+        }
     }
 
     pub fn title(&self) -> String {
         match self.active.and_then(|id| self.tree.get(id)) {
-            Some(node) => format!("{} — Oxide", node.name),
+            Some(node) => {
+                let mark = if self.is_dirty(node.id) { "* " } else { "" };
+                format!("{mark}{} — Oxide", node.name)
+            }
             None => "Oxide".to_string(),
         }
     }
@@ -353,8 +408,13 @@ impl Oxide {
         if let Some(r) = self.renaming.take() {
             let name = r.text.trim();
             if !name.is_empty() {
+                let mut changed = false;
                 if let Some(node) = self.tree.get_mut(r.id) {
+                    changed = node.name != name;
                     node.name = name.to_string();
+                }
+                if changed {
+                    self.persist();
                 }
             }
         }
@@ -404,6 +464,7 @@ impl Oxide {
                 if let Some(container) = self.container_for_target(target) {
                     if let Some(id) = self.tree.add_request(container) {
                         self.open_pinned(id);
+                        self.persist();
                     }
                 }
             }
@@ -411,11 +472,13 @@ impl Oxide {
                 if let Some(container) = self.container_for_target(target) {
                     if let Some(id) = self.tree.add_folder(container) {
                         self.selected = Some(id);
+                        self.persist();
                     }
                 }
             }
             MenuAction::NewCollection => {
                 self.selected = Some(self.tree.add_collection());
+                self.persist();
             }
             MenuAction::Rename => {
                 if let Some(id) = node_target {
@@ -426,12 +489,15 @@ impl Oxide {
                 if let Some(id) = node_target {
                     if let Some(copy) = self.tree.duplicate(id) {
                         self.selected = Some(copy);
+                        self.persist();
                     }
                 }
             }
             MenuAction::Delete => {
-                if let Some(id) = node_target {
-                    self.delete_node(id);
+                // Never delete directly: ask first.
+                if let Some(id) = node_target.filter(|&id| self.tree.get(id).is_some()) {
+                    self.commit_rename();
+                    self.confirm_delete = Some(id);
                 }
             }
             MenuAction::CloseTab => {
@@ -554,6 +620,7 @@ impl Oxide {
             Message::NewCollection => {
                 self.commit_rename();
                 self.selected = Some(self.tree.add_collection());
+                self.persist();
             }
             Message::RenameChanged(text) => {
                 if let Some(r) = &mut self.renaming {
@@ -587,6 +654,13 @@ impl Oxide {
                     Some(MenuTarget::Empty) | None => self.perform(action, None),
                 };
             }
+            Message::ConfirmDelete => {
+                if let Some(id) = self.confirm_delete.take() {
+                    self.delete_node(id);
+                    self.persist();
+                }
+            }
+            Message::CancelDelete => self.confirm_delete = None,
             Message::CloseMenu => self.menu = None,
             Message::Shortcut(shortcut) => {
                 self.menu = None;
@@ -680,6 +754,16 @@ impl Oxide {
     }
 
     fn handle_shortcut(&mut self, shortcut: Shortcut) -> Task<Message> {
+        // The delete dialog is modal: only Esc / Enter do anything.
+        if self.confirm_delete.is_some() {
+            match shortcut {
+                Shortcut::Escape => self.confirm_delete = None,
+                Shortcut::Confirm => return self.update(Message::ConfirmDelete),
+                _ => {}
+            }
+            return Task::none();
+        }
+
         // While a name is being edited, only Escape is meaningful.
         if self.renaming.is_some() {
             if matches!(shortcut, Shortcut::Escape) {
@@ -701,7 +785,11 @@ impl Oxide {
                 }
                 Task::none()
             }
-            Shortcut::Escape => Task::none(),
+            Shortcut::Escape | Shortcut::Confirm => Task::none(),
+            Shortcut::Save => {
+                self.save_active();
+                Task::none()
+            }
             Shortcut::FocusNext => operation::focus_next(),
             Shortcut::FocusPrevious => operation::focus_previous(),
         }
@@ -749,6 +837,10 @@ fn table_mut(req: &mut Request, list: KvList) -> &mut Vec<KeyValue> {
 }
 
 fn keep_trailing_blank(table: &mut Vec<KeyValue>) {
+    while table.len() > 1 && table[table.len() - 1].is_blank() && table[table.len() - 2].is_blank()
+    {
+        table.pop();
+    }
     if !table.last().is_some_and(KeyValue::is_blank) {
         table.push(KeyValue::empty());
     }
@@ -790,6 +882,7 @@ fn shortcut_for(
         keyboard::Key::Named(Named::Delete) => return Some(Shortcut::Delete),
         keyboard::Key::Named(Named::F2) => return Some(Shortcut::Rename),
         keyboard::Key::Named(Named::Escape) => return Some(Shortcut::Escape),
+        keyboard::Key::Named(Named::Enter) => return Some(Shortcut::Confirm),
         keyboard::Key::Named(Named::Tab) => {
             return Some(if modifiers.shift() {
                 Shortcut::FocusPrevious
@@ -810,7 +903,17 @@ fn shortcut_for(
         ('n', true) => Some(Shortcut::NewFolder),
         ('d', false) => Some(Shortcut::Duplicate),
         ('w', false) => Some(Shortcut::CloseTab),
+        ('s', false) => Some(Shortcut::Save),
         (c @ '1'..='9', false) => Some(Shortcut::GoToTab(c as usize - '1' as usize)),
         _ => None,
     }
+}
+
+fn starter_tree() -> Tree {
+    let mut tree = Tree::new();
+    let first = tree.add_collection();
+    if let Some(node) = tree.get_mut(first) {
+        node.name = "My Collection".into();
+    }
+    tree
 }

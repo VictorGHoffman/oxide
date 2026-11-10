@@ -265,6 +265,11 @@ impl Oxide {
         if let Some(menu) = &self.menu {
             layers = layers.push(self.menu_overlay(menu));
         }
+        if let Some(id) = self.confirm_delete {
+            if let Some(dialog) = self.delete_dialog(id) {
+                layers = layers.push(dialog);
+            }
+        }
         layers.into()
     }
 
@@ -299,14 +304,27 @@ impl Oxide {
             scrollable(rows).height(Fill).into()
         };
 
-        container(column![
+        let mut sidebar = column![
             header,
             mouse_area(list).on_right_press(Message::SidebarContext)
-        ])
-        .width(280)
-        .height(Fill)
-        .style(sidebar_style)
-        .into()
+        ];
+        if let Some(error) = &self.save_error {
+            sidebar = sidebar.push(
+                container(
+                    text(format!("Could not save: {error}"))
+                        .size(12)
+                        .color(color!(0xe5534b)),
+                )
+                .padding(10)
+                .width(Fill),
+            );
+        }
+
+        container(sidebar)
+            .width(280)
+            .height(Fill)
+            .style(sidebar_style)
+            .into()
     }
 
     fn push_rows<'a>(
@@ -359,12 +377,19 @@ impl Oxide {
                 text(&node.name)
                     .size(13)
                     .font(font)
+                    .width(Fill)
                     .wrapping(text::Wrapping::None)
                     .into()
             }
         };
 
-        let content = row![space().width(depth as f32 * 14.0), lead, label]
+        let dirty: Element<'a, Message> = if self.is_dirty(id) {
+            text("●").size(9).color(color!(0xe0652f)).into()
+        } else {
+            space().into()
+        };
+
+        let content = row![space().width(depth as f32 * 14.0), lead, label, dirty]
             .spacing(6)
             .align_y(iced::Center)
             .padding(Padding::from([5, 8]));
@@ -506,6 +531,66 @@ impl Oxide {
         stack![backdrop, positioned].into()
     }
 
+    // ───────────────────────── delete confirmation ─────────────────────────
+
+    fn delete_dialog(&self, id: Id) -> Option<Element<'_, Message>> {
+        let node = self.tree.get(id)?;
+
+        let (what, detail) = match node.kind {
+            Kind::Request(_) => ("request", String::from("This action cannot be undone.")),
+            Kind::Folder | Kind::Collection => {
+                let count = node.request_ids().len();
+                let what = if matches!(node.kind, Kind::Folder) {
+                    "folder"
+                } else {
+                    "collection"
+                };
+                (
+                    what,
+                    format!(
+                        "It contains {count} request{}. Everything inside will be deleted. This action cannot be undone.",
+                        if count == 1 { "" } else { "s" }
+                    ),
+                )
+            }
+        };
+
+        let card = container(
+            column![
+                text(format!("Delete {what}?")).size(17).font(BOLD),
+                text(format!("\"{}\" will be permanently deleted.", node.name)).size(13),
+                text(detail).size(13).style(muted),
+                space().height(6),
+                row![
+                    space().width(Fill),
+                    button(text("Cancel").size(13).center())
+                        .padding(Padding::from([7, 18]))
+                        .style(button::secondary)
+                        .on_press(Message::CancelDelete),
+                    button(text("Delete").size(13).center().color(Color::WHITE))
+                        .padding(Padding::from([7, 18]))
+                        .style(button::danger)
+                        .on_press(Message::ConfirmDelete),
+                ]
+                .spacing(8),
+            ]
+            .spacing(8),
+        )
+        .padding(20)
+        .width(400)
+        .style(card_style);
+
+        let dim = opaque(
+            mouse_area(container(space()).width(Fill).height(Fill).style(|_| {
+                container::Style::default().background(Color::from_rgba(0.0, 0.0, 0.0, 0.55))
+            }))
+            .on_press(Message::CancelDelete)
+            .on_right_press(Message::CancelDelete),
+        );
+
+        Some(stack![dim, container(opaque(card)).center(Fill)].into())
+    }
+
     // ───────────────────────── main area ─────────────────────────
 
     fn main_area(&self) -> Element<'_, Message> {
@@ -562,6 +647,7 @@ impl Oxide {
                 space().height(16),
                 hint("Ctrl+N", "New request"),
                 hint("Ctrl+Shift+N", "New folder"),
+                hint("Ctrl+S", "Save request"),
                 hint("Ctrl+D", "Duplicate"),
                 hint("F2", "Rename"),
                 hint("Del", "Delete"),
@@ -592,6 +678,11 @@ impl Oxide {
                     .width(Fill)
                     .font(if tab.pinned { Font::DEFAULT } else { ITALIC })
                     .wrapping(text::Wrapping::None),
+                if self.is_dirty(id) {
+                    Element::from(text("●").size(9).color(color!(0xe0652f)))
+                } else {
+                    Element::from(space())
+                },
                 button(text("×").size(15))
                     .padding(Padding::from([0, 5]))
                     .style(icon_button_style)
