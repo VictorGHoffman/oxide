@@ -141,17 +141,22 @@ fn row_style(selected: bool, hovered: bool) -> impl Fn(&Theme) -> container::Sty
     move |theme| {
         let p = theme.extended_palette();
         let background = if selected {
-            Some(p.primary.base.color.scale_alpha(0.28))
+            Some(p.primary.base.color.scale_alpha(0.20))
         } else if hovered {
-            Some(p.background.weak.color)
+            Some(p.background.weak.color.scale_alpha(0.7))
         } else {
             None
         };
         container::Style {
             background: background.map(Into::into),
             border: Border {
+                color: if selected {
+                    p.primary.base.color.scale_alpha(0.45)
+                } else {
+                    Color::TRANSPARENT
+                },
+                width: 1.0,
                 radius: RADIUS_MD.into(),
-                ..Border::default()
             },
             ..container::Style::default()
         }
@@ -283,6 +288,30 @@ fn tab_style(active: bool) -> impl Fn(&Theme) -> container::Style {
 }
 
 // ───────────────────────────── small builders ─────────────────────────────
+
+/// A "+" drawn from two bars, so it is exactly centred (a text glyph sits low).
+fn plus_icon<'a>() -> Element<'a, Message> {
+    let bar = |width: f32, height: f32| {
+        container(space())
+            .width(width)
+            .height(height)
+            .style(|_theme: &Theme| container::Style {
+                background: Some(Color::WHITE.into()),
+                border: Border {
+                    radius: 1.0.into(),
+                    ..Border::default()
+                },
+                ..container::Style::default()
+            })
+    };
+    stack![
+        container(bar(10.0, 2.0)).center(Fill),
+        container(bar(2.0, 10.0)).center(Fill),
+    ]
+    .width(12)
+    .height(12)
+    .into()
+}
 
 /// Which part of a little window-layout icon is filled.
 #[derive(Clone, Copy)]
@@ -445,21 +474,23 @@ impl Oxide {
 
     fn sidebar(&self) -> Element<'_, Message> {
         let header = row![
-            text("COLLECTIONS").size(11).font(BOLD).style(muted),
+            text("Collections").size(15).font(BOLD),
             space().width(Fill),
-            icon_button(Pane::Left, "Hide sidebar (Ctrl+B)", Message::ToggleSidebar),
-            button(text("Import").size(11))
-                .padding(Padding::from([2, 8]))
-                .style(icon_button_style)
+            button(text("Import").size(12))
+                .padding(Padding::from([4, 10]))
+                .style(pill_style(false))
                 .on_press(Message::MenuAction(MenuAction::ImportCollection)),
-            button(text("+").size(16))
-                .padding(Padding::from([0, 8]))
-                .style(icon_button_style)
+            button(container(plus_icon()).center(Fill))
+                .width(28)
+                .height(26)
+                .padding(0)
+                .style(primary_button)
                 .on_press(Message::NewCollection),
+            icon_button(Pane::Left, "Hide sidebar (Ctrl+B)", Message::ToggleSidebar),
         ]
-        .spacing(4)
+        .spacing(6)
         .align_y(iced::Center)
-        .padding(Padding::from([8, 12]));
+        .padding(Padding::from([12, 12]).bottom(8.0));
 
         let query = self.search.trim().to_lowercase();
         let search_box = {
@@ -496,10 +527,20 @@ impl Oxide {
             centered(text("No matching requests.").size(13).style(muted))
         } else if self.tree.roots.is_empty() {
             centered(
-                text("No collections yet.\nClick + to create one.")
-                    .size(13)
-                    .align_x(iced::Center)
-                    .style(muted),
+                column![
+                    text("No collections yet").size(14).font(SEMIBOLD),
+                    text("Create one, or import a Postman collection.")
+                        .size(12)
+                        .align_x(iced::Center)
+                        .style(muted),
+                    space().height(4),
+                    button(text("New Collection").size(13).center())
+                        .padding(Padding::from([7, 16]))
+                        .style(primary_button)
+                        .on_press(Message::NewCollection),
+                ]
+                .spacing(6)
+                .align_x(iced::Center),
             )
         } else {
             scrollable(rows).height(Fill).into()
@@ -544,6 +585,15 @@ impl Oxide {
             );
         }
 
+        sidebar = sidebar.push(
+            container(
+                container(space())
+                    .width(Fill)
+                    .height(1)
+                    .style(divider_style),
+            )
+            .padding(Padding::from([0, 12])),
+        );
         sidebar = sidebar.push(self.theme_bar());
 
         let width = self.sidebar_width.clamp(
@@ -730,12 +780,28 @@ impl Oxide {
         let hovered = self.hovered == Some(id);
 
         let lead: Element<'a, Message> = match &node.kind {
-            Kind::Request(req) => text(req.method.short())
-                .size(10)
-                .font(BOLD)
-                .width(36)
-                .color(method_color(req.method))
-                .into(),
+            Kind::Request(req) => {
+                let tint = method_color(req.method);
+                container(
+                    text(req.method.short())
+                        .size(9)
+                        .font(BOLD)
+                        .color(tint)
+                        .width(Fill)
+                        .align_x(iced::Center),
+                )
+                .width(38)
+                .padding(Padding::from([2, 0]))
+                .style(move |_theme: &Theme| container::Style {
+                    background: Some(tint.scale_alpha(0.14).into()),
+                    border: Border {
+                        radius: 5.0.into(),
+                        ..Border::default()
+                    },
+                    ..container::Style::default()
+                })
+                .into()
+            }
             _ => text(if node.expanded { "▾" } else { "▸" })
                 .size(12)
                 .width(14)
@@ -773,10 +839,26 @@ impl Oxide {
             space().into()
         };
 
-        let content = row![space().width(depth as f32 * 14.0), lead, label, dirty]
-            .spacing(6)
-            .align_y(iced::Center)
-            .padding(Padding::from([5, 8]));
+        // Containers show how many requests they hold.
+        let count: Element<'a, Message> = if node.is_container() {
+            text(node.request_ids().len().to_string())
+                .size(11)
+                .style(muted)
+                .into()
+        } else {
+            space().into()
+        };
+
+        let content = row![
+            space().width(depth as f32 * 16.0),
+            lead,
+            label,
+            count,
+            dirty
+        ]
+        .spacing(8)
+        .align_y(iced::Center)
+        .padding(Padding::from([6, 10]));
 
         mouse_area(
             container(content)
