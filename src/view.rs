@@ -1932,16 +1932,46 @@ impl Oxide {
     fn script_section<'a>(&'a self, rt: &'a Runtime) -> Element<'a, Message> {
         let mono = |line: &'static str| text(line).size(12).font(Font::MONOSPACE).style(muted);
 
-        let help = column![
-            text("Runs after every response. One assignment per line; the values become variables.")
-                .size(13)
-                .style(muted),
-            mono("token = body.data.access_token       (collection variable)"),
-            mono("global.user = header.X-User-Id       (global variable)"),
-            mono("auth = \"Bearer \" + body.token        (join text with +)"),
-            mono("sources: body, body.a.b[0].c, header.Name, cookie.Name, status, time, \"text\", {{var}}"),
+        let explanation = container(
+            column![
+                text("Runs after every response. One assignment per line; the values become variables.")
+                    .size(13),
+                mono("token = body.data.access_token       (collection variable)"),
+                mono("global.user = header.X-User-Id       (global variable)"),
+                mono("auth = \"Bearer \" + body.token        (join text with +)"),
+                mono("sources: body, body.a.b[0].c, header.Name, cookie.Name, status, time, \"text\", {{var}}"),
+            ]
+            .spacing(3),
+        )
+        .padding(Padding::from([8, 12]))
+        .style(card_style);
+
+        let badge = container(text("i").size(12).font(BOLD).center())
+            .width(18)
+            .height(18)
+            .center_x(18)
+            .center_y(18)
+            .style(|theme: &Theme| {
+                let palette = theme.extended_palette();
+                container::Style {
+                    text_color: Some(palette.background.base.text),
+                    border: Border {
+                        color: palette.background.strong.color,
+                        width: 1.0,
+                        radius: 9.0.into(),
+                    },
+                    ..container::Style::default()
+                }
+            });
+
+        let help = row![
+            tooltip(badge, explanation, tooltip::Position::Bottom)
+                .gap(6)
+                .delay(std::time::Duration::from_millis(150)),
+            text("Script").size(13).style(muted),
         ]
-        .spacing(2);
+        .spacing(8)
+        .align_y(iced::Alignment::Center);
 
         let editor = text_editor(&rt.script_editor)
             .style(editor_style)
