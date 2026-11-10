@@ -2,10 +2,14 @@
 
 mod app;
 mod highlight;
+mod htmlview;
 mod http;
+mod jsontree;
 mod model;
+mod oauth;
 mod postman;
 mod storage;
+mod suggest;
 mod theme;
 mod vars;
 mod view;

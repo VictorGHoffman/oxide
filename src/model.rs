@@ -225,16 +225,19 @@ pub enum BodyKind {
     Json,
     Xml,
     Text,
+    /// A file sent as the raw request body.
+    Binary,
 }
 
 impl BodyKind {
-    pub const ALL: [BodyKind; 6] = [
+    pub const ALL: [BodyKind; 7] = [
         BodyKind::None,
         BodyKind::FormData,
         BodyKind::UrlEncoded,
         BodyKind::Json,
         BodyKind::Xml,
         BodyKind::Text,
+        BodyKind::Binary,
     ];
 
     pub fn label(self) -> &'static str {
@@ -245,6 +248,7 @@ impl BodyKind {
             BodyKind::Json => "JSON",
             BodyKind::Xml => "XML",
             BodyKind::Text => "Text",
+            BodyKind::Binary => "binary",
         }
     }
 }
@@ -256,14 +260,16 @@ pub enum AuthKind {
     Bearer,
     Basic,
     ApiKey,
+    OAuth2,
 }
 
 impl AuthKind {
-    pub const ALL: [AuthKind; 4] = [
+    pub const ALL: [AuthKind; 5] = [
         AuthKind::None,
         AuthKind::Bearer,
         AuthKind::Basic,
         AuthKind::ApiKey,
+        AuthKind::OAuth2,
     ];
 }
 
@@ -274,6 +280,51 @@ impl fmt::Display for AuthKind {
             AuthKind::Bearer => "Bearer Token",
             AuthKind::Basic => "Basic Auth",
             AuthKind::ApiKey => "API Key",
+            AuthKind::OAuth2 => "OAuth 2.0",
+        })
+    }
+}
+
+/// How an OAuth 2.0 access token is requested.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum OAuthGrant {
+    /// Machine to machine: client id + secret.
+    #[default]
+    ClientCredentials,
+    /// The user's name and password are exchanged for a token.
+    Password,
+}
+
+impl OAuthGrant {
+    pub const ALL: [OAuthGrant; 2] = [OAuthGrant::ClientCredentials, OAuthGrant::Password];
+}
+
+impl fmt::Display for OAuthGrant {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            OAuthGrant::ClientCredentials => "Client Credentials",
+            OAuthGrant::Password => "Password",
+        })
+    }
+}
+
+/// Where the client id and secret travel when asking for a token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum OAuthClientAuth {
+    #[default]
+    BasicHeader,
+    Body,
+}
+
+impl OAuthClientAuth {
+    pub const ALL: [OAuthClientAuth; 2] = [OAuthClientAuth::BasicHeader, OAuthClientAuth::Body];
+}
+
+impl fmt::Display for OAuthClientAuth {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            OAuthClientAuth::BasicHeader => "Basic Auth header",
+            OAuthClientAuth::Body => "Request body",
         })
     }
 }
@@ -311,6 +362,8 @@ pub struct Request {
     pub body_text: String,
     pub form_data: Vec<KeyValue>,
     pub url_encoded: Vec<KeyValue>,
+    /// Path of the file sent when `body_kind` is `Binary`.
+    pub body_file: String,
 
     pub auth_kind: AuthKind,
     pub bearer_token: String,
@@ -319,6 +372,15 @@ pub struct Request {
     pub api_key_name: String,
     pub api_key_value: String,
     pub api_key_in: ApiKeyLocation,
+
+    pub oauth_grant: OAuthGrant,
+    pub oauth_token_url: String,
+    pub oauth_client_id: String,
+    pub oauth_client_secret: String,
+    pub oauth_scope: String,
+    pub oauth_username: String,
+    pub oauth_password: String,
+    pub oauth_client_auth: OAuthClientAuth,
 
     /// Post-response script: assigns response values to variables (see `vars`).
     pub script: String,
@@ -336,6 +398,7 @@ impl Default for Request {
             body_text: String::new(),
             form_data: blank_table(),
             url_encoded: blank_table(),
+            body_file: String::new(),
             auth_kind: AuthKind::None,
             bearer_token: String::new(),
             basic_user: String::new(),
@@ -343,6 +406,14 @@ impl Default for Request {
             api_key_name: String::new(),
             api_key_value: String::new(),
             api_key_in: ApiKeyLocation::Header,
+            oauth_grant: OAuthGrant::default(),
+            oauth_token_url: String::new(),
+            oauth_client_id: String::new(),
+            oauth_client_secret: String::new(),
+            oauth_scope: String::new(),
+            oauth_username: String::new(),
+            oauth_password: String::new(),
+            oauth_client_auth: OAuthClientAuth::default(),
             script: String::new(),
         }
     }
@@ -491,6 +562,17 @@ fn unique_copy_name(siblings: &[Node], name: &str) -> String {
         .expect("infinite iterator")
 }
 
+/// Where a dragged node lands relative to the row it is dropped on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DropZone {
+    /// Just above the row, as a sibling.
+    Before,
+    /// Inside the row's collection/folder (at the end).
+    Inside,
+    /// Just below the row, as a sibling.
+    After,
+}
+
 impl Tree {
     pub fn new() -> Self {
         Self {
@@ -635,6 +717,61 @@ impl Tree {
         Some(id)
     }
 
+    /// Where `id` would really land when dropped on `target` with `wanted`, or `None` when
+    /// that drop is not allowed: collections only reorder among collections, everything else
+    /// stays inside a collection, and nothing goes into itself.
+    pub fn drop_zone(&self, id: Id, target: Id, wanted: DropZone) -> Option<DropZone> {
+        if id == target || self.ancestors(target).contains(&id) {
+            return None;
+        }
+        let dragged = self.get(id)?;
+        let over = self.get(target)?;
+
+        if matches!(dragged.kind, Kind::Collection) {
+            return (matches!(over.kind, Kind::Collection) && wanted != DropZone::Inside)
+                .then_some(wanted);
+        }
+        match (&over.kind, wanted) {
+            // Nothing but collections lives at the top level.
+            (Kind::Collection, _) => Some(DropZone::Inside),
+            (Kind::Folder, zone) => Some(zone),
+            (Kind::Request(_), DropZone::Inside) => None,
+            (Kind::Request(_), zone) => Some(zone),
+        }
+    }
+
+    /// Moves `id` next to / into `target`. Returns whether anything moved.
+    pub fn move_node(&mut self, id: Id, target: Id, wanted: DropZone) -> bool {
+        let Some(zone) = self.drop_zone(id, target, wanted) else {
+            return false;
+        };
+        if zone != DropZone::Inside && self.parent_of(target).is_none() {
+            return false;
+        }
+        let Some(node) = self.remove(id) else {
+            return false;
+        };
+
+        match zone {
+            DropZone::Inside => {
+                let Some(container) = self.get_mut(target) else {
+                    return false;
+                };
+                container.expanded = true;
+                container.children.push(node);
+            }
+            DropZone::Before | DropZone::After => {
+                let parent = self.parent_of(target).unwrap_or(None);
+                let Some(list) = siblings_mut(&mut self.roots, parent) else {
+                    return false;
+                };
+                let at = list.iter().position(|n| n.id == target).unwrap_or(list.len());
+                list.insert(if zone == DropZone::After { at + 1 } else { at }, node);
+            }
+        }
+        true
+    }
+
     pub fn remove(&mut self, id: Id) -> Option<Node> {
         let parent = self.parent_of(id)?;
         let list = siblings_mut(&mut self.roots, parent)?;
@@ -720,6 +857,39 @@ mod tests {
         assert_eq!(t.get(a).unwrap().name, "New Request_1");
         assert_eq!(t.get(b).unwrap().name, "New Request_2");
         assert_eq!(t.get(c2).unwrap().name, "New Request_3");
+    }
+
+    #[test]
+    fn moving_nodes_around() {
+        let mut t = Tree::new();
+        let c1 = t.add_collection();
+        let c2 = t.add_collection();
+        let f = t.add_folder(c1).unwrap();
+        let a = t.add_request(c1).unwrap();
+        let b = t.add_request(f).unwrap();
+
+        // A request goes into a folder, then before another request.
+        assert!(t.move_node(a, f, DropZone::Inside));
+        assert_eq!(t.get(f).unwrap().children.last().unwrap().id, a);
+        assert!(t.move_node(a, b, DropZone::Before));
+        let names: Vec<Id> = t.get(f).unwrap().children.iter().map(|n| n.id).collect();
+        assert_eq!(names, vec![a, b]);
+
+        // Dropping on a collection's top/bottom edge still puts it inside.
+        assert_eq!(t.drop_zone(a, c2, DropZone::After), Some(DropZone::Inside));
+        assert!(t.move_node(a, c2, DropZone::After));
+        assert_eq!(t.parent_of(a), Some(Some(c2)));
+
+        // A folder cannot go into itself or its children; collections only reorder.
+        assert!(!t.move_node(f, b, DropZone::Inside));
+        assert!(!t.move_node(c1, f, DropZone::After));
+        assert!(!t.move_node(c1, c2, DropZone::Inside));
+        assert!(t.move_node(c1, c2, DropZone::After));
+        assert_eq!(t.roots.iter().map(|n| n.id).collect::<Vec<_>>(), vec![c2, c1]);
+        assert!(t.move_node(c1, c2, DropZone::Before));
+        assert_eq!(t.roots[0].id, c1);
+        // Nothing is ever lost.
+        assert_eq!(t.requests().len(), 2);
     }
 
     #[test]

@@ -119,7 +119,8 @@ pub async fn send(req: Request) -> Result<Response, String> {
 
     // Auth tab.
     match req.auth_kind {
-        AuthKind::None | AuthKind::Basic => {}
+        // OAuth 2.0 is turned into a Bearer token by `oauth::send` before we get here.
+        AuthKind::None | AuthKind::Basic | AuthKind::OAuth2 => {}
         AuthKind::Bearer => {
             if !req.bearer_token.trim().is_empty() {
                 let value = HeaderValue::from_str(&format!("Bearer {}", req.bearer_token.trim()))
@@ -158,6 +159,16 @@ pub async fn send(req: Request) -> Result<Response, String> {
         BodyKind::Text => {
             default_content_type = Some("text/plain");
             builder = builder.body(req.body_text.clone());
+        }
+        BodyKind::Binary => {
+            let path = req.body_file.trim();
+            if path.is_empty() {
+                return Err("Binary body: choose a file first.".into());
+            }
+            let bytes = std::fs::read(path)
+                .map_err(|e| format!("Could not read the body file \"{path}\": {e}"))?;
+            default_content_type = Some("application/octet-stream");
+            builder = builder.body(bytes);
         }
         BodyKind::UrlEncoded => {
             let pairs: Vec<(String, String)> = enabled(&req.url_encoded)

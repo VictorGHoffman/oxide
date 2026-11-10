@@ -400,7 +400,10 @@ fn parse_request(value: &Value, inherited_auth: Option<&Value>, counter: &mut Co
                     }
                 }
                 Some("graphql") => counter.warn("GraphQL bodies are not supported"),
-                Some("file") => counter.warn("binary file bodies are not supported"),
+                Some("file") => {
+                    req.body_kind = BodyKind::Binary;
+                    req.body_file = text(body.pointer("/file/src"));
+                }
                 _ => {}
             }
         }
@@ -467,6 +470,30 @@ fn apply_auth(req: &mut Request, auth: &Value, counter: &mut Counter) {
             } else {
                 ApiKeyLocation::Header
             };
+        }
+        "oauth2" => {
+            let grant = param("grant_type");
+            if grant.is_empty() || grant == "client_credentials" || grant == "password_credentials" {
+                req.auth_kind = AuthKind::OAuth2;
+                req.oauth_grant = if grant == "password_credentials" {
+                    OAuthGrant::Password
+                } else {
+                    OAuthGrant::ClientCredentials
+                };
+                req.oauth_token_url = param("accessTokenUrl");
+                req.oauth_client_id = param("clientId");
+                req.oauth_client_secret = param("clientSecret");
+                req.oauth_scope = param("scope");
+                req.oauth_username = param("username");
+                req.oauth_password = param("password");
+                req.oauth_client_auth = if param("client_authentication") == "body" {
+                    OAuthClientAuth::Body
+                } else {
+                    OAuthClientAuth::BasicHeader
+                };
+            } else {
+                counter.warn(&format!("OAuth 2.0 grant \"{grant}\" is not supported"));
+            }
         }
         "noauth" => req.auth_kind = AuthKind::None,
         other => counter.warn(&format!("auth type \"{other}\" is not supported")),
@@ -588,6 +615,10 @@ fn export_body(req: &Request) -> Option<Value> {
                 "options": { "raw": { "language": language } },
             }))
         }
+        BodyKind::Binary => Some(json!({
+            "mode": "file",
+            "file": { "src": req.body_file },
+        })),
         BodyKind::UrlEncoded => {
             let rows: Vec<Value> = live(&req.url_encoded).map(|r| row(r, true)).collect();
             Some(json!({ "mode": "urlencoded", "urlencoded": rows }))
@@ -617,6 +648,30 @@ fn export_auth(req: &Request) -> Option<Value> {
                 auth_param("password", &req.basic_password),
             ],
         })),
+        AuthKind::OAuth2 => {
+            let grant = match req.oauth_grant {
+                OAuthGrant::ClientCredentials => "client_credentials",
+                OAuthGrant::Password => "password_credentials",
+            };
+            let client_auth = match req.oauth_client_auth {
+                OAuthClientAuth::BasicHeader => "header",
+                OAuthClientAuth::Body => "body",
+            };
+            let mut params = vec![
+                auth_param("grant_type", grant),
+                auth_param("accessTokenUrl", &req.oauth_token_url),
+                auth_param("clientId", &req.oauth_client_id),
+                auth_param("clientSecret", &req.oauth_client_secret),
+                auth_param("scope", &req.oauth_scope),
+                auth_param("client_authentication", client_auth),
+                auth_param("addTokenTo", "header"),
+            ];
+            if req.oauth_grant == OAuthGrant::Password {
+                params.push(auth_param("username", &req.oauth_username));
+                params.push(auth_param("password", &req.oauth_password));
+            }
+            Some(json!({ "type": "oauth2", "oauth2": params }))
+        }
         AuthKind::ApiKey => {
             let location = match req.api_key_in {
                 ApiKeyLocation::Header => "header",
@@ -836,6 +891,36 @@ mod tests {
         let mut other = Tree::new();
         let summary = import(&mut other, &json).unwrap();
 
+        let back = other.get(summary.collection).unwrap().children[0]
+            .request()
+            .unwrap();
+        assert_eq!(back, &original);
+    }
+
+    #[test]
+    fn binary_body_and_oauth_round_trip() {
+        let mut tree = Tree::new();
+        let collection = tree.add_collection();
+        let id = tree.add_request(collection).unwrap();
+        {
+            let req = tree.request_mut(id).unwrap();
+            req.body_kind = BodyKind::Binary;
+            req.body_file = "/tmp/data.bin".into();
+            req.auth_kind = AuthKind::OAuth2;
+            req.oauth_grant = OAuthGrant::Password;
+            req.oauth_token_url = "https://auth.test/token".into();
+            req.oauth_client_id = "id".into();
+            req.oauth_client_secret = "secret".into();
+            req.oauth_scope = "read write".into();
+            req.oauth_username = "bob".into();
+            req.oauth_password = "pw".into();
+            req.oauth_client_auth = OAuthClientAuth::Body;
+        }
+        let original = tree.request(id).unwrap().clone();
+
+        let json = export(tree.get(collection).unwrap());
+        let mut other = Tree::new();
+        let summary = import(&mut other, &json).unwrap();
         let back = other.get(summary.collection).unwrap().children[0]
             .request()
             .unwrap();

@@ -6,8 +6,11 @@ use std::time::{Duration, Instant};
 use iced::widget::{operation, scrollable, text_editor};
 use iced::{event, keyboard, mouse, window, Event, Point, Size, Subscription, Task, Theme};
 
+use crate::htmlview;
 use crate::http;
+use crate::jsontree;
 use crate::model::*;
+use crate::oauth;
 use crate::postman;
 use crate::storage;
 use crate::theme;
@@ -48,6 +51,10 @@ pub enum ResponseTab {
 pub enum BodyView {
     Pretty,
     Raw,
+    /// JSON as a collapsible tree.
+    Tree,
+    /// HTML drawn as a page.
+    Preview,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,6 +100,15 @@ pub enum Edit {
     ApiKeyName(String),
     ApiKeyValue(String),
     ApiKeyIn(ApiKeyLocation),
+    BodyFile(String),
+    OAuthGrant(OAuthGrant),
+    OAuthTokenUrl(String),
+    OAuthClientId(String),
+    OAuthClientSecret(String),
+    OAuthScope(String),
+    OAuthUsername(String),
+    OAuthPassword(String),
+    OAuthClientAuth(OAuthClientAuth),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -190,6 +206,8 @@ pub enum Message {
     SelectNode(Id),
     OpenPinned(Id),
     HoverNode(Option<Id>),
+    /// The mouse moved over a row while dragging: `(row, y inside the row)`.
+    NodeDragOver(Id, f32),
     NodeContext(Id),
     SidebarContext,
     NewCollection,
@@ -221,11 +239,22 @@ pub enum Message {
     SectionChanged(Section),
     Send,
     Cancel,
-    Response(Id, u64, Result<http::Response, String>),
+    /// The result, plus the OAuth 2.0 token that was used (when there is one).
+    Response(Id, u64, Result<http::Response, String>, Option<oauth::Token>),
+    PickBodyFile,
+    BodyFilePicked(Id, Option<String>),
+    OAuthFetch,
+    OAuthFetched(Id, Result<oauth::Token, String>),
+    OAuthClear,
 
     // Response viewer
     ResponseTabChanged(ResponseTab),
     BodyViewChanged(BodyView),
+    ToggleJsonNode(String),
+    JsonExpandAll,
+    JsonCollapseAll,
+    OpenLink(String),
+    OpenInBrowser,
     ResponseAction(text_editor::Action),
     CopyBody,
 }
@@ -245,6 +274,21 @@ pub struct TabDrag {
     pub start_index: usize,
     pub moved: bool,
 }
+
+/// A sidebar node being dragged to a new place.
+pub struct NodeDrag {
+    pub id: Id,
+    pub start: Point,
+    /// Becomes `true` once the mouse has moved far enough to count as a drag.
+    pub active: bool,
+    /// Where it would land if released now.
+    pub target: Option<(Id, DropZone)>,
+    /// Whether the node was an open folder before the press (pressing toggles it).
+    pub was_expanded: bool,
+}
+
+/// Height of a sidebar row; the vertical position inside it picks the drop zone.
+pub const ROW_HEIGHT: f32 = 30.0;
 
 pub struct Renaming {
     pub id: Id,
@@ -277,6 +321,14 @@ pub struct Runtime {
     /// Versions undone, for Ctrl+Y.
     pub redo: Vec<Request>,
     pub last_edit: Option<Instant>,
+    /// Result of the last "Get new token": `(is_error, text)`.
+    pub oauth_status: Option<(bool, String)>,
+    pub oauth_busy: bool,
+    /// The response parsed as JSON (for the tree view) and which nodes are open.
+    pub json: Option<serde_json::Value>,
+    pub json_open: HashSet<String>,
+    /// The response parsed as an HTML page (for the preview), when it is one.
+    pub html: Option<Vec<htmlview::Block>>,
 }
 
 impl Runtime {
@@ -295,6 +347,11 @@ impl Runtime {
             undo: Vec::new(),
             redo: Vec::new(),
             last_edit: None,
+            oauth_status: None,
+            oauth_busy: false,
+            json: None,
+            json_open: HashSet::new(),
+            html: None,
         }
     }
 }
@@ -331,6 +388,7 @@ pub struct Oxide {
     /// Text typed in the sidebar search box (empty = show everything).
     pub search: String,
     pub tab_drag: Option<TabDrag>,
+    pub node_drag: Option<NodeDrag>,
     pub theme_index: usize,
     /// Global variables (shared by all collections).
     pub globals: Vec<KeyValue>,
@@ -343,6 +401,8 @@ pub struct Oxide {
     pub response_height: f32,
     pub response_width: f32,
     pub drag: Option<Drag>,
+    /// OAuth 2.0 tokens by request id (saved in tokens.json).
+    pub tokens: HashMap<Id, oauth::Token>,
     /// Selected nodes besides the primary one (`selected`).
     pub extra: HashSet<Id>,
     /// Where a Shift+click range starts.
@@ -380,6 +440,7 @@ impl Oxide {
             notice: None,
             search: String::new(),
             tab_drag: None,
+            node_drag: None,
             theme_index: 0,
             globals: storage::load_globals(),
             vars_dialog: None,
@@ -389,6 +450,7 @@ impl Oxide {
             response_height: 320.0,
             response_width: 480.0,
             drag: None,
+            tokens: storage::load_tokens(),
             extra: HashSet::new(),
             anchor: selected,
             modifiers: keyboard::Modifiers::default(),
@@ -419,6 +481,19 @@ impl Oxide {
             theme: theme::ENTRIES
                 .get(self.theme_index)
                 .map(|e| e.name.to_string()),
+            // While a divider is being dragged the last settled layout is kept, so the
+            // file is written once when the mouse is released, not on every movement.
+            layout: if self.drag.is_some() {
+                self.last_session.layout.clone()
+            } else {
+                Some(storage::Layout {
+                    sidebar_visible: self.sidebar_visible,
+                    sidebar_width: self.sidebar_width.round() as u32,
+                    response_right: self.response_right,
+                    response_width: self.response_width.round() as u32,
+                    response_height: self.response_height.round() as u32,
+                })
+            },
         }
     }
 
@@ -429,6 +504,13 @@ impl Oxide {
         };
         if let Some(index) = session.theme.as_deref().and_then(theme::index_of) {
             self.theme_index = index;
+        }
+        if let Some(layout) = &session.layout {
+            self.sidebar_visible = layout.sidebar_visible;
+            self.sidebar_width = (layout.sidebar_width as f32).clamp(MIN_SIDEBAR, MAX_SIDEBAR);
+            self.response_right = layout.response_right;
+            self.response_width = (layout.response_width as f32).max(MIN_RESPONSE_WIDTH);
+            self.response_height = (layout.response_height as f32).max(MIN_RESPONSE_HEIGHT);
         }
         for tab in session.tabs {
             let exists = self.tree.request(tab.id).is_some();
@@ -1006,6 +1088,15 @@ impl Oxide {
             Edit::ApiKeyName(v) => req.api_key_name = v,
             Edit::ApiKeyValue(v) => req.api_key_value = v,
             Edit::ApiKeyIn(v) => req.api_key_in = v,
+            Edit::BodyFile(v) => req.body_file = v,
+            Edit::OAuthGrant(v) => req.oauth_grant = v,
+            Edit::OAuthTokenUrl(v) => req.oauth_token_url = v,
+            Edit::OAuthClientId(v) => req.oauth_client_id = v,
+            Edit::OAuthClientSecret(v) => req.oauth_client_secret = v,
+            Edit::OAuthScope(v) => req.oauth_scope = v,
+            Edit::OAuthUsername(v) => req.oauth_username = v,
+            Edit::OAuthPassword(v) => req.oauth_password = v,
+            Edit::OAuthClientAuth(v) => req.oauth_client_auth = v,
         }
         if params_changed {
             req.url_from_params();
@@ -1034,6 +1125,13 @@ impl Oxide {
                     self.toggle_selection(id);
                 } else {
                     self.select_only(id);
+                    self.node_drag = Some(NodeDrag {
+                        id,
+                        start: self.cursor,
+                        active: false,
+                        target: None,
+                        was_expanded: self.tree.get(id).is_some_and(|n| n.expanded),
+                    });
 
                     let is_request = self.tree.get(id).is_some_and(|n| !n.is_container());
                     if is_request {
@@ -1056,7 +1154,15 @@ impl Oxide {
                     node.expanded = !node.expanded;
                 }
             }
-            Message::HoverNode(id) => self.hovered = id,
+            Message::HoverNode(id) => {
+                self.hovered = id;
+                if id.is_none() {
+                    if let Some(drag) = &mut self.node_drag {
+                        drag.target = None;
+                    }
+                }
+            }
+            Message::NodeDragOver(row, y) => self.drag_over(row, y),
             Message::NodeContext(id) => {
                 self.commit_rename();
                 // Right-clicking inside a multi-selection keeps it, so the
@@ -1184,6 +1290,7 @@ impl Oxide {
                 self.cursor = p;
                 self.apply_drag();
                 self.apply_tab_drag();
+                self.apply_node_drag();
             }
             Message::OpenVariables(scope) => {
                 self.menu = None;
@@ -1215,6 +1322,7 @@ impl Oxide {
             Message::DragEnd => {
                 self.drag = None;
                 self.tab_drag = None;
+                self.finish_node_drag();
             }
             Message::TabPressed(id) => {
                 self.commit_rename();
@@ -1236,6 +1344,21 @@ impl Oxide {
             Message::Edit(edit) => {
                 if let Some(id) = self.active {
                     let before = self.tree.request(id).cloned();
+                    // A token belongs to the settings it was requested with.
+                    let invalidates_token = matches!(
+                        edit,
+                        Edit::OAuthGrant(_)
+                            | Edit::OAuthTokenUrl(_)
+                            | Edit::OAuthClientId(_)
+                            | Edit::OAuthClientSecret(_)
+                            | Edit::OAuthScope(_)
+                            | Edit::OAuthUsername(_)
+                            | Edit::OAuthPassword(_)
+                            | Edit::OAuthClientAuth(_)
+                    );
+                    if invalidates_token && self.tokens.remove(&id).is_some() {
+                        self.save_tokens();
+                    }
                     if self.apply_edit(id, edit) {
                         self.pin(id); // editing a preview tab keeps it open
                         self.record_history(id, before);
@@ -1258,7 +1381,10 @@ impl Oxide {
                     }
                 }
             }
-            Message::Response(id, token, result) => {
+            Message::Response(id, token, result, used_token) => {
+                if let Some(used) = used_token {
+                    self.remember_token(id, used);
+                }
                 let mut succeeded = false;
                 if let Some(rt) = self.runtime.get_mut(&id) {
                     if rt.token == token && matches!(rt.state, ResponseState::Sending) {
@@ -1268,6 +1394,17 @@ impl Oxide {
                                 rt.body_view = BodyView::Pretty;
                                 rt.response_editor =
                                     text_editor::Content::with_text(&resp.body_pretty);
+                                rt.json = if resp.is_binary {
+                                    None
+                                } else {
+                                    jsontree::parse(&resp.body_raw)
+                                };
+                                rt.json_open = rt
+                                    .json
+                                    .as_ref()
+                                    .map(jsontree::default_open)
+                                    .unwrap_or_default();
+                                rt.html = is_html(&resp).then(|| htmlview::parse(&resp.body_raw));
                                 rt.state = ResponseState::Done(Box::new(resp));
                                 succeeded = true;
                             }
@@ -1277,6 +1414,46 @@ impl Oxide {
                 }
                 if succeeded {
                     self.run_script(id);
+                }
+            }
+
+            Message::PickBodyFile => {
+                if let Some(id) = self.active {
+                    return Task::perform(pick_body_file(), move |path| {
+                        Message::BodyFilePicked(id, path)
+                    });
+                }
+            }
+            Message::BodyFilePicked(id, path) => {
+                if let Some(path) = path {
+                    let before = self.tree.request(id).cloned();
+                    if self.apply_edit(id, Edit::BodyFile(path)) {
+                        self.pin(id);
+                        self.record_history(id, before);
+                    }
+                }
+            }
+            Message::OAuthFetch => return self.fetch_token(),
+            Message::OAuthFetched(id, result) => {
+                if let Some(rt) = self.runtime.get_mut(&id) {
+                    rt.oauth_busy = false;
+                    rt.oauth_status = Some(match &result {
+                        Ok(_) => (false, "Token received.".to_string()),
+                        Err(e) => (true, e.clone()),
+                    });
+                }
+                if let Ok(token) = result {
+                    self.remember_token(id, token);
+                }
+            }
+            Message::OAuthClear => {
+                if let Some(id) = self.active {
+                    if self.tokens.remove(&id).is_some() {
+                        self.save_tokens();
+                    }
+                    if let Some(rt) = self.runtime.get_mut(&id) {
+                        rt.oauth_status = None;
+                    }
                 }
             }
 
@@ -1291,10 +1468,72 @@ impl Oxide {
                     rt.body_view = view;
                     if let ResponseState::Done(resp) = &rt.state {
                         let text = match view {
-                            BodyView::Pretty => &resp.body_pretty,
-                            BodyView::Raw => &resp.body_raw,
+                            BodyView::Pretty => Some(&resp.body_pretty),
+                            BodyView::Raw => Some(&resp.body_raw),
+                            BodyView::Tree | BodyView::Preview => None,
                         };
-                        rt.response_editor = text_editor::Content::with_text(text);
+                        if let Some(text) = text {
+                            rt.response_editor = text_editor::Content::with_text(text);
+                        }
+                    }
+                }
+            }
+            Message::ToggleJsonNode(path) => {
+                if let Some(rt) = self.active.and_then(|id| self.runtime.get_mut(&id)) {
+                    if !rt.json_open.remove(&path) {
+                        rt.json_open.insert(path);
+                    }
+                }
+            }
+            Message::JsonExpandAll => {
+                if let Some(rt) = self.active.and_then(|id| self.runtime.get_mut(&id)) {
+                    if let Some(json) = &rt.json {
+                        rt.json_open = jsontree::all_open(json);
+                    }
+                }
+            }
+            Message::JsonCollapseAll => {
+                if let Some(rt) = self.active.and_then(|id| self.runtime.get_mut(&id)) {
+                    rt.json_open = jsontree::root_only();
+                }
+            }
+            Message::OpenLink(target) => {
+                // Relative links point into the page that was fetched.
+                let base = self
+                    .active
+                    .and_then(|id| self.runtime.get(&id))
+                    .and_then(|rt| match &rt.state {
+                        ResponseState::Done(resp) => Some(resp.final_url.clone()),
+                        _ => None,
+                    });
+                let full = resolve_link(base.as_deref(), &target);
+                if full.starts_with("http://") || full.starts_with("https://") {
+                    if let Err(e) = open_target(&full) {
+                        self.notice = Some(Notice {
+                            text: format!("Could not open the link: {e}"),
+                            error: true,
+                        });
+                    }
+                }
+            }
+            Message::OpenInBrowser => {
+                let html = self
+                    .active
+                    .and_then(|id| self.runtime.get(&id))
+                    .and_then(|rt| match &rt.state {
+                        ResponseState::Done(resp) => Some(resp.body_raw.clone()),
+                        _ => None,
+                    });
+                if let Some(html) = html {
+                    let path = std::env::temp_dir().join("oxide-preview.html");
+                    let result = std::fs::write(&path, html)
+                        .map_err(|e| e.to_string())
+                        .and_then(|_| open_target(&path.display().to_string()));
+                    if let Err(e) = result {
+                        self.notice = Some(Notice {
+                            text: format!("Could not open the browser: {e}"),
+                            error: true,
+                        });
                     }
                 }
             }
@@ -1310,8 +1549,8 @@ impl Oxide {
                 if let Some(rt) = self.active.and_then(|id| self.runtime.get(&id)) {
                     if let ResponseState::Done(resp) = &rt.state {
                         let text = match rt.body_view {
-                            BodyView::Pretty => resp.body_pretty.clone(),
-                            BodyView::Raw => resp.body_raw.clone(),
+                            BodyView::Pretty | BodyView::Tree => resp.body_pretty.clone(),
+                            BodyView::Raw | BodyView::Preview => resp.body_raw.clone(),
                         };
                         return iced::clipboard::write(text);
                     }
@@ -1365,6 +1604,10 @@ impl Oxide {
                 Task::none()
             }
             Shortcut::Escape => {
+                if self.node_drag.as_ref().is_some_and(|d| d.active) {
+                    self.node_drag = None; // cancel a drag
+                    return Task::none();
+                }
                 if self.search.is_empty() {
                     self.extra.clear();
                 } else {
@@ -1693,6 +1936,86 @@ impl Oxide {
         }
     }
 
+    /// Turns a press on a sidebar row into a drag once the mouse has moved a little.
+    fn apply_node_drag(&mut self) {
+        let cursor = self.cursor;
+        let Some(drag) = &mut self.node_drag else {
+            return;
+        };
+        if drag.active {
+            return;
+        }
+        let moved = (cursor.x - drag.start.x).hypot(cursor.y - drag.start.y);
+        if moved < 6.0 {
+            return;
+        }
+        drag.active = true;
+        let (id, was_expanded) = (drag.id, drag.was_expanded);
+        // The press toggled a folder: put it back so a drag does not fold it.
+        if let Some(node) = self.tree.get_mut(id) {
+            if node.is_container() {
+                node.expanded = was_expanded;
+            }
+        }
+    }
+
+    /// The mouse is over `row`, `y` pixels from its top: work out where a drop would land.
+    fn drag_over(&mut self, row: Id, y: f32) {
+        let Some(drag) = &self.node_drag else {
+            return;
+        };
+        if !drag.active {
+            return;
+        }
+        let dragged = drag.id;
+        let over_container = self.tree.get(row).is_some_and(Node::is_container);
+        let dragged_collection = self
+            .tree
+            .get(dragged)
+            .is_some_and(|n| matches!(n.kind, Kind::Collection));
+
+        let ratio = y / ROW_HEIGHT;
+        let wanted = if over_container && !dragged_collection {
+            if ratio < 0.25 {
+                DropZone::Before
+            } else if ratio > 0.75 {
+                DropZone::After
+            } else {
+                DropZone::Inside
+            }
+        } else if ratio < 0.5 {
+            DropZone::Before
+        } else {
+            DropZone::After
+        };
+
+        let target = self
+            .tree
+            .drop_zone(dragged, row, wanted)
+            .map(|zone| (row, zone));
+        if let Some(drag) = &mut self.node_drag {
+            drag.target = target;
+        }
+    }
+
+    /// The mouse was released: drop the node where the indicator was, if anywhere.
+    fn finish_node_drag(&mut self) {
+        let Some(drag) = self.node_drag.take() else {
+            return;
+        };
+        if !drag.active {
+            return;
+        }
+        let Some((target, zone)) = drag.target else {
+            return;
+        };
+        if self.tree.move_node(drag.id, target, zone) {
+            self.tree.expand_ancestors(drag.id);
+            self.select_only(drag.id);
+            self.persist();
+        }
+    }
+
     /// Resizes the panel whose border is being dragged.
     fn apply_drag(&mut self) {
         let Some(drag) = &self.drag else {
@@ -1723,6 +2046,54 @@ impl Oxide {
                 self.response_height = (drag.size - dy).clamp(MIN_RESPONSE_HEIGHT, max);
             }
         }
+    }
+
+    fn remember_token(&mut self, id: Id, token: oauth::Token) {
+        if self.tokens.get(&id) != Some(&token) {
+            self.tokens.insert(id, token);
+            self.save_tokens();
+        }
+    }
+
+    fn save_tokens(&mut self) {
+        if let Err(e) = storage::save_tokens(&self.tokens) {
+            self.save_error = Some(e);
+        }
+    }
+
+    /// "Get new token" in the Auth tab: always asks the server (the refresh token is used
+    /// when there is one and it is still accepted).
+    fn fetch_token(&mut self) -> Task<Message> {
+        let Some(id) = self.active else {
+            return Task::none();
+        };
+        let Some(request) = self.tree.request(id) else {
+            return Task::none();
+        };
+        let request = vars::resolve(request, &|name| self.lookup_variable(id, name));
+        let config = oauth::Config::from_request(&request);
+        let refresh = self.tokens.get(&id).and_then(|t| t.refresh_token.clone());
+
+        self.ensure_runtime(id);
+        if let Some(rt) = self.runtime.get_mut(&id) {
+            if rt.oauth_busy {
+                return Task::none();
+            }
+            rt.oauth_busy = true;
+            rt.oauth_status = None;
+        }
+        Task::perform(
+            async move {
+                // Try the refresh token first, then fall back to a fresh grant.
+                if let Some(refresh) = refresh.as_deref() {
+                    if let Ok(token) = oauth::fetch(&config, Some(refresh)).await {
+                        return Ok(token);
+                    }
+                }
+                oauth::fetch(&config, None).await
+            },
+            move |result| Message::OAuthFetched(id, result),
+        )
     }
 
     fn send_active(&mut self) -> Task<Message> {
@@ -1756,8 +2127,9 @@ impl Oxide {
         let token = rt.token;
         rt.state = ResponseState::Sending;
 
-        let (task, handle) = Task::perform(http::send(request), move |r| {
-            Message::Response(id, token, r)
+        let current = self.tokens.get(&id).cloned();
+        let (task, handle) = Task::perform(oauth::send(request, current), move |(r, used)| {
+            Message::Response(id, token, r, used)
         })
         .abortable();
         rt.abort = Some(handle);
@@ -1991,6 +2363,72 @@ async fn pick_collections() -> Result<Vec<(String, String)>, String> {
         out.push((name, text.trim_start_matches('\u{feff}').to_string()));
     }
     Ok(out)
+}
+
+/// Whether the response is an HTML page.
+fn is_html(resp: &http::Response) -> bool {
+    if resp.is_binary || resp.body_raw.is_empty() {
+        return false;
+    }
+    let kind = resp
+        .header("content-type")
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let start: String = resp
+        .body_raw
+        .trim_start()
+        .chars()
+        .take(15)
+        .collect::<String>()
+        .to_lowercase();
+    kind.contains("html") || start.starts_with("<!doctype html") || start.starts_with("<html")
+}
+
+/// Makes a link found in a page absolute, using the page's own address.
+fn resolve_link(base: Option<&str>, link: &str) -> String {
+    let link = link.trim();
+    if link.contains("://") {
+        return link.to_string();
+    }
+    base.and_then(|b| reqwest::Url::parse(b).ok())
+        .and_then(|b| b.join(link).ok())
+        .map(|u| u.to_string())
+        .unwrap_or_else(|| link.to_string())
+}
+
+/// Opens a web address or a file with the system's default program.
+fn open_target(target: &str) -> Result<(), String> {
+    use std::process::Command;
+
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut c = Command::new("rundll32");
+        c.args(["url.dll,FileProtocolHandler", target]);
+        c
+    };
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut c = Command::new("open");
+        c.arg(target);
+        c
+    };
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut command = {
+        let mut c = Command::new("xdg-open");
+        c.arg(target);
+        c
+    };
+
+    command.spawn().map(|_| ()).map_err(|e| e.to_string())
+}
+
+/// Lets the user pick the file sent as a binary body.
+async fn pick_body_file() -> Option<String> {
+    rfd::AsyncFileDialog::new()
+        .set_title("Choose the file to send")
+        .pick_file()
+        .await
+        .map(|file| file.path().display().to_string())
 }
 
 /// Asks where to save the collection and writes it there.

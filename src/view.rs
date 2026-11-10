@@ -10,8 +10,11 @@ use iced::{color, Background, Border, Color, Element, Fill, Length, Padding, The
 
 use crate::app::*;
 use crate::highlight;
+use crate::htmlview;
+use crate::jsontree;
 use crate::http::{format_duration, format_size};
 use crate::model::*;
+use crate::suggest;
 use crate::theme;
 use crate::vars;
 
@@ -162,6 +165,32 @@ fn row_style(selected: bool, hovered: bool) -> impl Fn(&Theme) -> container::Sty
             },
             ..container::Style::default()
         }
+    }
+}
+
+/// The line shown above/below a row a node would be dropped next to.
+fn drop_line_style(theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(theme.palette().primary.into()),
+        border: Border {
+            radius: 1.0.into(),
+            ..Border::default()
+        },
+        ..container::Style::default()
+    }
+}
+
+/// The frame shown on a folder/collection a node would be dropped into.
+fn drop_inside_style(theme: &Theme) -> container::Style {
+    let primary = theme.palette().primary;
+    container::Style {
+        background: Some(primary.scale_alpha(0.16).into()),
+        border: Border {
+            color: primary,
+            width: 1.5,
+            radius: RADIUS_MD.into(),
+        },
+        ..container::Style::default()
     }
 }
 
@@ -547,6 +576,9 @@ impl Oxide {
                 layers = layers.push(dialog);
             }
         }
+        if let Some(ghost) = self.drag_ghost() {
+            layers = layers.push(ghost);
+        }
         layers.into()
     }
 
@@ -858,6 +890,12 @@ impl Oxide {
         let id = node.id;
         let selected = self.is_selected(id);
         let hovered = self.hovered == Some(id);
+        let dragging = self.node_drag.as_ref().filter(|d| d.active);
+        let being_dragged = dragging.is_some_and(|d| d.id == id);
+        let drop_zone = dragging
+            .and_then(|d| d.target)
+            .filter(|(target, _)| *target == id)
+            .map(|(_, zone)| zone);
 
         let lead: Element<'a, Message> = match &node.kind {
             Kind::Request(req) => {
@@ -940,18 +978,87 @@ impl Oxide {
         .align_y(iced::Center)
         .padding(Padding::from([6, 10]));
 
-        mouse_area(
-            container(content)
-                .width(Fill)
-                .clip(true)
-                .style(row_style(selected, hovered)),
+        let body = container(content)
+            .width(Fill)
+            .height(ROW_HEIGHT)
+            .align_y(iced::alignment::Vertical::Center)
+            .clip(true)
+            .style(row_style(selected, hovered));
+
+        // While dragging, the row under the mouse shows where the node would land.
+        let shown: Element<'a, Message> = match drop_zone {
+            Some(DropZone::Inside) => stack![
+                body,
+                container(space())
+                    .width(Fill)
+                    .height(Fill)
+                    .style(drop_inside_style)
+            ]
+            .into(),
+            Some(zone) => {
+                let line = container(space().height(2))
+                    .width(Fill)
+                    .style(drop_line_style);
+                let at = if zone == DropZone::Before {
+                    iced::alignment::Vertical::Top
+                } else {
+                    iced::alignment::Vertical::Bottom
+                };
+                stack![
+                    body,
+                    container(line).width(Fill).height(Fill).align_y(at)
+                ]
+                .into()
+            }
+            None if being_dragged => container(body).style(|_: &Theme| container::Style {
+                text_color: None,
+                ..container::Style::default()
+            })
+            .into(),
+            None => body.into(),
+        };
+
+        let mut area = mouse_area(shown)
+            .on_press(Message::SelectNode(id))
+            .on_double_click(Message::OpenPinned(id))
+            .on_right_press(Message::NodeContext(id))
+            .on_enter(Message::HoverNode(Some(id)))
+            .on_exit(Message::HoverNode(None));
+        if dragging.is_some() {
+            area = area
+                .on_move(move |p| Message::NodeDragOver(id, p.y))
+                .interaction(Interaction::Grabbing);
+        }
+        area.into()
+    }
+
+    /// A small label that follows the mouse while a node is dragged.
+    fn drag_ghost(&self) -> Option<Element<'_, Message>> {
+        let drag = self.node_drag.as_ref().filter(|d| d.active)?;
+        let node = self.tree.get(drag.id)?;
+        let label = match &node.kind {
+            Kind::Request(req) => format!("{}  {}", req.method.short(), node.name),
+            _ => node.name.clone(),
+        };
+        let x = (self.cursor.x + 14.0).min(self.window_size.width - 200.0).max(0.0);
+        let y = (self.cursor.y + 10.0).min(self.window_size.height - 40.0).max(0.0);
+        Some(
+            container(
+                container(text(label).size(12).wrapping(text::Wrapping::None))
+                    .padding(Padding::from([5, 10]))
+                    .max_width(220)
+                    .style(card_style),
+            )
+            .padding(Padding {
+                top: y,
+                left: x,
+                right: 0.0,
+                bottom: 0.0,
+            })
+            .width(Fill)
+            .height(Fill)
+            .into(),
         )
-        .on_press(Message::SelectNode(id))
-        .on_double_click(Message::OpenPinned(id))
-        .on_right_press(Message::NodeContext(id))
-        .on_enter(Message::HoverNode(Some(id)))
-        .on_exit(Message::HoverNode(None))
-        .into()
     }
 
     // ───────────────────────── context menu ─────────────────────────
@@ -1525,7 +1632,7 @@ impl Oxide {
             Section::Headers => kv_table(Some(self), KvList::Headers, &req.headers, "Header", "Value"),
             Section::Cookies => kv_table(Some(self), KvList::Cookies, &req.cookies, "Cookie name", "Value"),
             Section::Body => self.body_section(req, rt),
-            Section::Auth => self.auth_section(req),
+            Section::Auth => self.auth_section(req, rt),
             Section::Script => self.script_section(rt),
         }
     }
@@ -1550,6 +1657,7 @@ impl Oxide {
             ),
             BodyKind::FormData => kv_table(Some(self), KvList::FormData, &req.form_data, "Key", "Value"),
             BodyKind::UrlEncoded => kv_table(Some(self), KvList::UrlEncoded, &req.url_encoded, "Key", "Value"),
+            BodyKind::Binary => self.binary_body(req),
             BodyKind::Json | BodyKind::Xml | BodyKind::Text => {
                 let placeholder = match req.body_kind {
                     BodyKind::Json => "{\n  \"hello\": \"world\"\n}",
@@ -1579,6 +1687,65 @@ impl Oxide {
         };
 
         column![kinds, content].spacing(10).height(Fill).into()
+    }
+
+    /// The "binary" body: one file sent as it is.
+    fn binary_body<'a>(&'a self, req: &'a Request) -> Element<'a, Message> {
+        let path = req.body_file.trim();
+        let info: Element<'a, Message> = if path.is_empty() {
+            text("No file selected").size(13).style(muted).into()
+        } else {
+            let name = std::path::Path::new(path)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.to_string());
+            let detail = match std::fs::metadata(path) {
+                Ok(meta) => format_size(meta.len() as usize),
+                Err(_) => "file not found".to_string(),
+            };
+            let missing = std::fs::metadata(path).is_err();
+            column![
+                text(name).size(14).font(SEMIBOLD),
+                text(path.to_string()).size(12).style(muted),
+                if missing {
+                    text(detail).size(12).color(color!(0xe5534b))
+                } else {
+                    text(detail).size(12).style(muted)
+                },
+            ]
+            .spacing(3)
+            .into()
+        };
+
+        let mut buttons = Row::new().spacing(8).push(
+            button(text(if path.is_empty() { "Choose file…" } else { "Change file…" }).size(13))
+                .padding(Padding::from([6, 14]))
+                .style(primary_button)
+                .on_press(Message::PickBodyFile),
+        );
+        if !path.is_empty() {
+            buttons = buttons.push(
+                button(text("Remove").size(13))
+                    .padding(Padding::from([6, 14]))
+                    .style(secondary_button)
+                    .on_press(Message::Edit(Edit::BodyFile(String::new()))),
+            );
+        }
+
+        container(
+            column![
+                info,
+                buttons,
+                text("The file is sent as the raw request body (Content-Type: application/octet-stream unless you set a header).")
+                    .size(12)
+                    .style(muted),
+            ]
+            .spacing(12),
+        )
+        .padding(10)
+        .width(Fill)
+        .height(Fill)
+        .into()
     }
 
     /// Approximate width of the request editor's content, in pixels.
@@ -1631,54 +1798,55 @@ impl Oxide {
             .iter()
             .any(|p| matches!(p, vars::Piece::Variable { .. }));
         let fits = value.chars().count() as f32 * size * 0.62 < width - 2.0 * padding - 8.0;
-
-        let Some(request) = self.active.filter(|_| has_variables && fits) else {
-            return input.style(input_style).into();
-        };
+        let coloured = has_variables && fits && self.active.is_some();
 
         let palette = self.theme().palette();
         let mut spans: Vec<iced::widget::text::Span<'a, (), Font>> = Vec::new();
         let mut tips: Vec<Element<'a, Message>> = Vec::new();
-        let mut seen: Vec<&str> = Vec::new();
 
-        for piece in &pieces {
-            match piece {
-                vars::Piece::Text(plain) => spans.push(span(plain.to_string())),
-                vars::Piece::Variable { raw, name } => {
-                    let found = self.lookup_variable_in_scope(request, name);
-                    let color = if found.is_some() {
-                        palette.primary
-                    } else {
-                        palette.danger
-                    };
-                    spans.push(span(raw.to_string()).color(color));
-
-                    if !seen.contains(name) {
-                        seen.push(name);
-                        let line = match found {
-                            Some((value, scope)) => {
-                                let shown: String = value.chars().take(120).collect();
-                                let more = if value.chars().count() > 120 { "…" } else { "" };
-                                text(format!("{{{{{name}}}}} = {shown}{more}   ({scope})"))
-                                    .size(12)
-                            }
-                            None => text(format!("{{{{{name}}}}} is not defined"))
-                                .size(12)
-                                .color(palette.danger),
+        if let (true, Some(request)) = (coloured, self.active) {
+            let mut seen: Vec<&str> = Vec::new();
+            for piece in &pieces {
+                match piece {
+                    vars::Piece::Text(plain) => spans.push(span(plain.to_string())),
+                    vars::Piece::Variable { raw, name } => {
+                        let found = self.lookup_variable_in_scope(request, name);
+                        let color = if found.is_some() {
+                            palette.primary
+                        } else {
+                            palette.danger
                         };
-                        tips.push(line.into());
+                        spans.push(span(raw.to_string()).color(color));
+
+                        if !seen.contains(name) {
+                            seen.push(name);
+                            let line = match found {
+                                Some((value, scope)) => {
+                                    let shown: String = value.chars().take(120).collect();
+                                    let more = if value.chars().count() > 120 { "…" } else { "" };
+                                    text(format!("{{{{{name}}}}} = {shown}{more}   ({scope})"))
+                                        .size(12)
+                                }
+                                None => text(format!("{{{{{name}}}}} is not defined"))
+                                    .size(12)
+                                    .color(palette.danger),
+                            };
+                            tips.push(line.into());
+                        }
                     }
                 }
             }
         }
 
+        // The widget tree keeps the same shape whether or not there is anything to colour,
+        // otherwise the input would lose the keyboard the moment a `{{variable}}` is closed.
         let underlay = container(rich_text(spans).size(size))
             .padding(padding)
             .width(Fill)
-            .style(|theme: &Theme| {
+            .style(move |theme: &Theme| {
                 let base = text_input::default(theme, text_input::Status::Active);
                 container::Style {
-                    background: Some(base.background),
+                    background: coloured.then_some(base.background),
                     border: Border {
                         radius: RADIUS_MD.into(),
                         ..Border::default()
@@ -1687,23 +1855,55 @@ impl Oxide {
                 }
             });
 
-        let input = input.style(|theme: &Theme, status| {
+        let input = input.style(move |theme: &Theme, status| {
             let mut style = input_style(theme, status);
-            style.background = Background::Color(Color::TRANSPARENT);
-            style.value = Color::TRANSPARENT;
+            if coloured {
+                style.background = Background::Color(Color::TRANSPARENT);
+                style.value = Color::TRANSPARENT;
+            }
             style
         });
 
-        tooltip(
-            stack![underlay, input],
+        let hint: Element<'a, Message> = if tips.is_empty() {
+            space().into()
+        } else {
             container(Column::with_children(tips).spacing(3))
                 .padding(Padding::from([6, 10]))
-                .style(card_style),
+                .style(card_style)
+                .into()
+        };
+        let field = tooltip(
+            stack![underlay, input],
+            hint,
             tooltip::Position::FollowCursor,
         )
         .gap(14)
-        .delay(std::time::Duration::from_millis(250))
-        .into()
+        .delay(std::time::Duration::from_millis(250));
+
+        // `{{na` typed at the end: offer the variables that start with "na".
+        let mut items: Vec<suggest::Suggestion> = Vec::new();
+        let mut partial_len = 0;
+        if let (Some(partial), Some(request)) = (suggest::partial_at_end(value), self.active) {
+            partial_len = partial.chars().count();
+            let wanted = partial.to_lowercase();
+            for name in self.defined_variables() {
+                if name.to_lowercase().starts_with(&wanted) {
+                    let hint = self
+                        .lookup_variable(request, &name)
+                        .map(|v| {
+                            let short: String = v.chars().take(28).collect();
+                            if v.chars().count() > 28 {
+                                format!("{short}…")
+                            } else {
+                                short
+                            }
+                        })
+                        .unwrap_or_default();
+                    items.push(suggest::Suggestion { name, hint });
+                }
+            }
+        }
+        suggest::suggest(field, items, partial_len)
     }
 
     /// Highlighting of the body editor: JSON / XML colours plus `{{variables}}`.
@@ -1822,7 +2022,7 @@ impl Oxide {
         Some(stack![dim, container(opaque(card)).center(Fill)].into())
     }
 
-    fn auth_section<'a>(&'a self, req: &'a Request) -> Element<'a, Message> {
+    fn auth_section<'a>(&'a self, req: &'a Request, rt: &'a Runtime) -> Element<'a, Message> {
         let kind = labeled(
             "Type",
             pick_list(AuthKind::ALL, Some(req.auth_kind), |k| {
@@ -1874,6 +2074,7 @@ impl Oxide {
             ]
             .spacing(8)
             .into(),
+            AuthKind::OAuth2 => self.oauth_fields(req, rt),
             AuthKind::ApiKey => column![
                 labeled(
                     "Key",
@@ -1921,6 +2122,121 @@ impl Oxide {
         )
         .height(Fill)
         .into()
+    }
+
+    fn oauth_fields<'a>(&'a self, req: &'a Request, rt: &'a Runtime) -> Element<'a, Message> {
+        let width = self.auth_width();
+        let field = |label: &'static str, value: &'a str, edit: fn(String) -> Edit| {
+            labeled(
+                label,
+                self.var_input(label, value, 16.0, 6.0, width, move |s| Message::Edit(edit(s)), None),
+            )
+        };
+
+        let mut form = Column::new().spacing(8).push(labeled(
+            "Grant type",
+            pick_list(OAuthGrant::ALL, Some(req.oauth_grant), |g| {
+                Message::Edit(Edit::OAuthGrant(g))
+            })
+            .width(200)
+            .padding(6)
+            .style(pick_style),
+        ));
+        form = form.push(field("Access Token URL", &req.oauth_token_url, Edit::OAuthTokenUrl));
+        form = form.push(field("Client ID", &req.oauth_client_id, Edit::OAuthClientId));
+        form = form.push(labeled(
+            "Client Secret",
+            text_input("Client Secret", &req.oauth_client_secret)
+                .style(input_style)
+                .on_input(|s| Message::Edit(Edit::OAuthClientSecret(s)))
+                .secure(true)
+                .padding(6),
+        ));
+        if req.oauth_grant == OAuthGrant::Password {
+            form = form.push(field("Username", &req.oauth_username, Edit::OAuthUsername));
+            form = form.push(labeled(
+                "Password",
+                text_input("Password", &req.oauth_password)
+                    .style(input_style)
+                    .on_input(|s| Message::Edit(Edit::OAuthPassword(s)))
+                    .secure(true)
+                    .padding(6),
+            ));
+        }
+        form = form.push(field("Scope", &req.oauth_scope, Edit::OAuthScope));
+        form = form.push(labeled(
+            "Client auth",
+            pick_list(OAuthClientAuth::ALL, Some(req.oauth_client_auth), |c| {
+                Message::Edit(Edit::OAuthClientAuth(c))
+            })
+            .width(200)
+            .padding(6)
+            .style(pick_style),
+        ));
+
+        // The token that is currently saved for this request.
+        let token = self.active.and_then(|id| self.tokens.get(&id));
+        let token_info: Element<'a, Message> = match token {
+            Some(t) => {
+                let shown: String = if t.access_token.chars().count() > 28 {
+                    let head: String = t.access_token.chars().take(12).collect();
+                    let tail: String = t.access_token.chars().rev().take(8).collect::<Vec<_>>().into_iter().rev().collect();
+                    format!("{head}…{tail}")
+                } else {
+                    t.access_token.clone()
+                };
+                let expiry = crate::oauth::describe_expiry(t);
+                let refresh = if t.refresh_token.is_some() {
+                    " · has refresh token (renewed automatically)"
+                } else {
+                    " · renewed by asking again"
+                };
+                let color = if t.is_expired() {
+                    color!(0xe5534b)
+                } else {
+                    color!(0x4caf50)
+                };
+                column![
+                    text(shown).size(13).font(Font::MONOSPACE),
+                    text(format!("{expiry}{refresh}")).size(12).color(color),
+                ]
+                .spacing(3)
+                .into()
+            }
+            None => text("No token yet. It is requested automatically when you send, or press the button.")
+                .size(12)
+                .style(muted)
+                .into(),
+        };
+
+        let mut buttons = Row::new().spacing(8).push(
+            button(text(if rt.oauth_busy { "Requesting…" } else { "Get new token" }).size(13))
+                .padding(Padding::from([6, 14]))
+                .style(primary_button)
+                .on_press_maybe((!rt.oauth_busy).then_some(Message::OAuthFetch)),
+        );
+        if token.is_some() {
+            buttons = buttons.push(
+                button(text("Clear token").size(13))
+                    .padding(Padding::from([6, 14]))
+                    .style(secondary_button)
+                    .on_press(Message::OAuthClear),
+            );
+        }
+
+        let mut out = Column::new()
+            .spacing(12)
+            .push(form)
+            .push(token_info)
+            .push(buttons);
+        if let Some((is_error, message)) = &rt.oauth_status {
+            out = out.push(if *is_error {
+                text(message).size(12).color(color!(0xe5534b))
+            } else {
+                text(message).size(12).style(muted)
+            });
+        }
+        out.into()
     }
 
     // ───────────────────────── response ─────────────────────────
@@ -2004,22 +2320,55 @@ impl Oxide {
         .spacing(4);
 
         let tools: Element<'a, Message> = if rt.response_tab == ResponseTab::Body {
-            row![
-                button(text("Pretty").size(12))
+            let view_button = |label: &'static str, view: BodyView| {
+                button(text(label).size(12))
                     .padding(Padding::from([3, 8]))
-                    .style(pill_style(rt.body_view == BodyView::Pretty))
-                    .on_press(Message::BodyViewChanged(BodyView::Pretty)),
-                button(text("Raw").size(12))
-                    .padding(Padding::from([3, 8]))
-                    .style(pill_style(rt.body_view == BodyView::Raw))
-                    .on_press(Message::BodyViewChanged(BodyView::Raw)),
-                button(text("Copy").size(12))
-                    .padding(Padding::from([3, 8]))
-                    .style(pill_style(false))
-                    .on_press(Message::CopyBody),
-            ]
-            .spacing(4)
-            .into()
+                    .style(pill_style(rt.body_view == view))
+                    .on_press(Message::BodyViewChanged(view))
+            };
+            let mut tools = Row::new().spacing(4).align_y(iced::Center);
+            if rt.body_view == BodyView::Tree && rt.json.is_some() {
+                tools = tools
+                    .push(
+                        button(text("Expand all").size(12))
+                            .padding(Padding::from([3, 8]))
+                            .style(pill_style(false))
+                            .on_press(Message::JsonExpandAll),
+                    )
+                    .push(
+                        button(text("Collapse all").size(12))
+                            .padding(Padding::from([3, 8]))
+                            .style(pill_style(false))
+                            .on_press(Message::JsonCollapseAll),
+                    )
+                    .push(space().width(8));
+            }
+            if rt.body_view == BodyView::Preview && rt.html.is_some() {
+                tools = tools
+                    .push(
+                        button(text("Open in browser").size(12))
+                            .padding(Padding::from([3, 8]))
+                            .style(pill_style(false))
+                            .on_press(Message::OpenInBrowser),
+                    )
+                    .push(space().width(8));
+            }
+            tools = tools.push(view_button("Pretty", BodyView::Pretty));
+            if rt.json.is_some() {
+                tools = tools.push(view_button("Tree", BodyView::Tree));
+            }
+            if rt.html.is_some() {
+                tools = tools.push(view_button("Preview", BodyView::Preview));
+            }
+            tools = tools
+                .push(view_button("Raw", BodyView::Raw))
+                .push(
+                    button(text("Copy").size(12))
+                        .padding(Padding::from([3, 8]))
+                        .style(pill_style(false))
+                        .on_press(Message::CopyBody),
+                );
+            tools.into()
         } else {
             space().into()
         };
@@ -2028,6 +2377,10 @@ impl Oxide {
             ResponseTab::Body => {
                 if resp.body_raw.is_empty() {
                     centered(text("This response has no body").size(13).style(muted))
+                } else if rt.body_view == BodyView::Tree && rt.json.is_some() {
+                    self.json_tree(rt)
+                } else if rt.body_view == BodyView::Preview && rt.html.is_some() {
+                    self.html_preview(rt)
                 } else {
                     text_editor(&rt.response_editor)
                         .highlight(response_syntax(resp), self.highlight_theme())
@@ -2117,6 +2470,239 @@ impl Oxide {
         ]
         .spacing(8)
         .into()
+    }
+}
+
+impl Oxide {
+    /// The response as a collapsible JSON tree.
+    fn json_tree<'a>(&'a self, rt: &'a Runtime) -> Element<'a, Message> {
+        let Some(json) = &rt.json else {
+            return space().into();
+        };
+        let palette = self.theme().palette();
+        let string_color = palette.success;
+        let number_color = palette.primary;
+        let keyword_color = palette.danger;
+        let (rows, truncated) = jsontree::rows(json, &rt.json_open);
+
+        let mut list = Column::new().spacing(1);
+        for node in rows {
+            let is_container = matches!(node.leaf, jsontree::Leaf::Container { .. });
+            let caret: Element<'a, Message> = if is_container {
+                text(if node.open { "▾" } else { "▸" })
+                    .size(12)
+                    .width(14)
+                    .style(muted)
+                    .into()
+            } else {
+                space().width(14).into()
+            };
+
+            let mut line = Row::new()
+                .spacing(0)
+                .align_y(iced::Center)
+                .push(space().width(node.depth as f32 * 18.0))
+                .push(caret);
+
+            match &node.key {
+                jsontree::Key::Root => {}
+                jsontree::Key::Name(name) => {
+                    line = line
+                        .push(text(format!("\"{name}\"")).size(13).font(Font::MONOSPACE))
+                        .push(text(": ").size(13).font(Font::MONOSPACE).style(muted));
+                }
+                jsontree::Key::Index(index) => {
+                    line = line
+                        .push(text(format!("{index}")).size(13).font(Font::MONOSPACE).style(muted))
+                        .push(text(": ").size(13).font(Font::MONOSPACE).style(muted));
+                }
+            }
+
+            let value = |content: String, color: Option<Color>| {
+                let t = text(content).size(13).font(Font::MONOSPACE);
+                match color {
+                    Some(c) => t.color(c),
+                    None => t.style(muted),
+                }
+            };
+            line = line.push(match &node.leaf {
+                jsontree::Leaf::Container { array, len } => {
+                    let (open, close) = if *array { ("[", "]") } else { ("{", "}") };
+                    let noun = if *array { "item" } else { "key" };
+                    let shape = if node.open {
+                        open.to_string()
+                    } else if *len == 0 {
+                        format!("{open}{close}")
+                    } else {
+                        format!("{open}…{close}")
+                    };
+                    value(
+                        format!("{shape}  {len} {noun}{}", if *len == 1 { "" } else { "s" }),
+                        None,
+                    )
+                }
+                jsontree::Leaf::Str(s) => value(format!("\"{s}\""), Some(string_color)),
+                jsontree::Leaf::Number(n) => value(n.clone(), Some(number_color)),
+                jsontree::Leaf::Bool(b) => value(b.to_string(), Some(keyword_color)),
+                jsontree::Leaf::Null => value("null".into(), Some(keyword_color)),
+            });
+
+            if is_container {
+                list = list.push(
+                    mouse_area(line)
+                        .interaction(Interaction::Pointer)
+                        .on_press(Message::ToggleJsonNode(node.path.clone())),
+                );
+            } else {
+                list = list.push(line);
+            }
+        }
+        if truncated {
+            list = list.push(
+                text(format!(
+                    "Showing the first {} rows. Collapse some nodes to see the rest.",
+                    jsontree::ROW_LIMIT
+                ))
+                .size(12)
+                .style(muted),
+            );
+        }
+
+        container(scrollable(list.padding(Padding::from([4, 6]))).width(Fill).height(Fill))
+            .padding(6)
+            .width(Fill)
+            .height(Fill)
+            .style(|theme: &Theme| {
+                let base = text_editor::default(theme, text_editor::Status::Active);
+                container::Style {
+                    background: Some(base.background),
+                    border: Border {
+                        radius: RADIUS_MD.into(),
+                        ..Border::default()
+                    },
+                    ..container::Style::default()
+                }
+            })
+            .into()
+    }
+
+    /// The response drawn as a simple page.
+    fn html_preview<'a>(&'a self, rt: &'a Runtime) -> Element<'a, Message> {
+        let Some(blocks) = &rt.html else {
+            return space().into();
+        };
+        let palette = self.theme().palette();
+        let link_color = palette.primary;
+        let tint = Color {
+            a: 0.14,
+            ..palette.text
+        };
+
+        let rich = move |runs: &'a [htmlview::Run],
+                         size: f32,
+                         bold: bool|
+              -> Element<'a, Message> {
+            let spans: Vec<text::Span<'a, String, Font>> = runs
+                .iter()
+                .map(|run| {
+                    let mut s = span(run.text.clone());
+                    if run.code {
+                        s = s.font(Font::MONOSPACE);
+                    } else if run.bold || bold {
+                        s = s.font(BOLD);
+                    } else if run.italic {
+                        s = s.font(ITALIC);
+                    }
+                    if run.code || run.mark {
+                        s = s.background(tint);
+                    }
+                    if run.underline {
+                        s = s.underline(true);
+                    }
+                    if run.strike {
+                        s = s.strikethrough(true);
+                    }
+                    if let Some(link) = &run.link {
+                        s = s.color(link_color).link(link.clone());
+                    }
+                    s
+                })
+                .collect();
+            rich_text(spans)
+                .size(size)
+                .on_link_click(Message::OpenLink)
+                .width(Fill)
+                .into()
+        };
+
+        let mut page = Column::new().spacing(10).padding(Padding::from([8, 14]));
+        for block in blocks {
+            let element: Element<'a, Message> = match block {
+                htmlview::Block::Heading(level, runs) => {
+                    let size = match level {
+                        1 => 28.0,
+                        2 => 23.0,
+                        3 => 19.0,
+                        4 => 17.0,
+                        _ => 15.0,
+                    };
+                    rich(runs, size, true)
+                }
+                htmlview::Block::Paragraph(runs) => rich(runs, 14.0, false),
+                htmlview::Block::Item {
+                    depth,
+                    marker,
+                    runs,
+                } => row![
+                    space().width(8.0 + *depth as f32 * 22.0),
+                    text(marker.clone()).size(14).width(22),
+                    rich(runs, 14.0, false),
+                ]
+                .into(),
+                htmlview::Block::Quote(runs) => container(rich(runs, 14.0, false))
+                    .padding(Padding::from([6, 12]))
+                    .width(Fill)
+                    .style(card_style)
+                    .into(),
+                htmlview::Block::Pre(code) => container(
+                    text(code.clone()).size(13).font(Font::MONOSPACE).width(Fill),
+                )
+                .padding(10)
+                .width(Fill)
+                .style(card_style)
+                .into(),
+                htmlview::Block::Rule => container(space().height(1))
+                    .width(Fill)
+                    .style(divider_style)
+                    .into(),
+                htmlview::Block::Row(cells) => Row::with_children(cells.iter().map(|cell| {
+                    container(rich(cell, 13.0, false))
+                        .padding(Padding::from([4, 8]))
+                        .width(Fill)
+                        .style(card_style)
+                        .into()
+                }))
+                .spacing(2)
+                .into(),
+            };
+            page = page.push(element);
+        }
+
+        container(scrollable(page).width(Fill).height(Fill))
+            .width(Fill)
+            .height(Fill)
+            .style(|theme: &Theme| {
+                let base = text_editor::default(theme, text_editor::Status::Active);
+                container::Style {
+                    background: Some(base.background),
+                    border: Border {
+                        radius: RADIUS_MD.into(),
+                        ..Border::default()
+                    },
+                    ..container::Style::default()
+                }
+            })
+            .into()
     }
 }
 

@@ -1,11 +1,13 @@
 //! Persistence: `<Documents>/Oxide/collections.json`.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
 use crate::model::{Id, KeyValue, Tree};
+use crate::oauth::Token;
 
 pub fn file_path() -> Option<PathBuf> {
     let documents =
@@ -78,12 +80,48 @@ pub fn save_globals(globals: &[KeyValue]) -> Result<(), String> {
     fs::rename(&tmp, &path).map_err(|e| format!("Could not save {}: {e}", path.display()))
 }
 
+// ───────────────────────────── OAuth 2.0 tokens ─────────────────────────────
+
+fn tokens_path() -> Option<PathBuf> {
+    file_path().map(|p| p.with_file_name("tokens.json"))
+}
+
+/// The OAuth 2.0 tokens obtained so far, by request id.
+pub fn load_tokens() -> HashMap<Id, Token> {
+    tokens_path()
+        .and_then(|path| fs::read_to_string(path).ok())
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_tokens(tokens: &HashMap<Id, Token>) -> Result<(), String> {
+    let path = tokens_path().ok_or("Could not find the Documents folder.")?;
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir).map_err(|e| format!("Could not create {}: {e}", dir.display()))?;
+    }
+    let json = serde_json::to_string_pretty(tokens).map_err(|e| e.to_string())?;
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, json).map_err(|e| format!("Could not write {}: {e}", tmp.display()))?;
+    fs::rename(&tmp, &path).map_err(|e| format!("Could not save {}: {e}", path.display()))
+}
+
 // ───────────────────────────── session (open tabs) ─────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionTab {
     pub id: Id,
     pub pinned: bool,
+}
+
+/// Sizes and positions of the panels (whole pixels, so sessions compare cheaply).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Layout {
+    pub sidebar_visible: bool,
+    pub sidebar_width: u32,
+    /// `true` = response docked on the right.
+    pub response_right: bool,
+    pub response_width: u32,
+    pub response_height: u32,
 }
 
 /// What was open when the app was last used.
@@ -94,6 +132,9 @@ pub struct Session {
     /// Name of the selected theme.
     #[serde(default)]
     pub theme: Option<String>,
+    /// Panel sizes and the response dock position.
+    #[serde(default)]
+    pub layout: Option<Layout>,
 }
 
 fn session_path() -> Option<PathBuf> {
