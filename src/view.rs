@@ -414,6 +414,11 @@ impl Oxide {
         if let Some(menu) = &self.menu {
             layers = layers.push(self.menu_overlay(menu));
         }
+        if let Some(scope) = self.vars_dialog {
+            if let Some(dialog) = self.variables_dialog(scope) {
+                layers = layers.push(dialog);
+            }
+        }
         if let Some(ids) = &self.confirm_delete {
             if let Some(dialog) = self.delete_dialog(ids) {
                 layers = layers.push(dialog);
@@ -601,6 +606,10 @@ impl Oxide {
     fn theme_bar(&self) -> Element<'_, Message> {
         container(
             row![
+                button(text("Globals").size(12))
+                    .padding(Padding::from([5, 10]))
+                    .style(pill_style(false))
+                    .on_press(Message::OpenVariables(VarScope::Global)),
                 pick_list(
                     theme::Choice::all(),
                     Some(theme::Choice(self.theme_index)),
@@ -768,6 +777,7 @@ impl Oxide {
                     true,
                     false,
                 ),
+                Item("Variables…", None, MenuAction::EditVariables, true, false),
                 Separator,
                 Item("Delete", Some("Del"), MenuAction::Delete, true, true),
             ],
@@ -1165,7 +1175,7 @@ impl Oxide {
             style
         });
 
-        let url = text_input("Enter URL, e.g. https://httpbin.org/get", &req.url)
+        let url = text_input("Enter URL", &req.url)
             .style(input_style)
             .on_input(|s| Message::Edit(Edit::Url(s)))
             .on_submit(Message::Send)
@@ -1233,9 +1243,20 @@ impl Oxide {
                     }
                 ),
             ),
+            (
+                Section::Script,
+                format!(
+                    "Script{}",
+                    if req.script.trim().is_empty() {
+                        ""
+                    } else {
+                        " •"
+                    }
+                ),
+            ),
         ];
 
-        Row::with_children(sections.into_iter().map(|(section, label)| {
+        let mut bar = Row::with_children(sections.into_iter().map(|(section, label)| {
             button(text(label).size(13))
                 .padding(Padding::from([5, 12]))
                 .style(pill_style(rt.section == section))
@@ -1243,7 +1264,21 @@ impl Oxide {
                 .into()
         }))
         .spacing(4)
-        .into()
+        .align_y(iced::Center);
+
+        // Shortcut to the variables of this request's collection.
+        if let Some(root) = self
+            .active
+            .map(|id| self.tree.ancestors(id).last().copied().unwrap_or(id))
+        {
+            bar = bar.push(space().width(Fill)).push(
+                button(text("Variables").size(12))
+                    .padding(Padding::from([4, 10]))
+                    .style(icon_button_style)
+                    .on_press(Message::OpenVariables(VarScope::Collection(root))),
+            );
+        }
+        bar.into()
     }
 
     fn section_content<'a>(&'a self, req: &'a Request, rt: &'a Runtime) -> Element<'a, Message> {
@@ -1253,6 +1288,7 @@ impl Oxide {
             Section::Cookies => kv_table(KvList::Cookies, &req.cookies, "Cookie name", "Value"),
             Section::Body => self.body_section(req, rt),
             Section::Auth => self.auth_section(req),
+            Section::Script => self.script_section(rt),
         }
     }
 
@@ -1295,6 +1331,98 @@ impl Oxide {
         };
 
         column![kinds, content].spacing(10).height(Fill).into()
+    }
+
+    fn script_section<'a>(&'a self, rt: &'a Runtime) -> Element<'a, Message> {
+        let mono = |line: &'static str| text(line).size(12).font(Font::MONOSPACE).style(muted);
+
+        let help = column![
+            text("Runs after every response. One assignment per line; the values become variables.")
+                .size(13)
+                .style(muted),
+            mono("token = body.data.access_token       (collection variable)"),
+            mono("global.user = header.X-User-Id       (global variable)"),
+            mono("auth = \"Bearer \" + body.token        (join text with +)"),
+            mono("sources: body, body.a.b[0].c, header.Name, cookie.Name, status, time, \"text\", {{var}}"),
+        ]
+        .spacing(2);
+
+        let editor = text_editor(&rt.script_editor)
+            .style(editor_style)
+            .placeholder("token = body.access_token")
+            .on_action(|a| Message::Edit(Edit::ScriptAction(a)))
+            .font(Font::MONOSPACE)
+            .size(13)
+            .padding(10)
+            .height(Fill);
+
+        let mut content = column![help, editor].spacing(8).height(Fill);
+        if !rt.script_output.is_empty() {
+            let lines = rt.script_output.iter().map(|(is_error, line)| {
+                if *is_error {
+                    text(format!("error: {line}"))
+                        .size(12)
+                        .font(Font::MONOSPACE)
+                        .color(color!(0xe5534b))
+                        .into()
+                } else {
+                    text(format!("set {line}"))
+                        .size(12)
+                        .font(Font::MONOSPACE)
+                        .color(color!(0x4caf7d))
+                        .into()
+                }
+            });
+            content = content.push(Column::with_children(lines).spacing(2));
+        }
+        content.into()
+    }
+
+    /// The editor for global or collection variables.
+    fn variables_dialog(&self, scope: VarScope) -> Option<Element<'_, Message>> {
+        let rows = self.variables(scope)?;
+        let (title, hint) = match scope {
+            VarScope::Global => (
+                "Global variables".to_string(),
+                "Available in every collection. A collection variable with the same name wins.",
+            ),
+            VarScope::Collection(id) => (
+                format!("Variables — {}", self.tree.get(id)?.name),
+                "Only for the requests of this collection. They win over global variables with the same name.",
+            ),
+        };
+
+        let card = container(
+            column![
+                text(title).size(17).font(BOLD),
+                text(hint).size(13).style(muted),
+                text("Use {{name}} in the URL, params, headers, cookies, body and auth. A request's Script tab can fill them from a response.")
+                    .size(12)
+                    .style(muted),
+                container(kv_table(KvList::Vars, rows, "Variable", "Value")).height(300),
+                row![
+                    space().width(Fill),
+                    button(text("Close").size(13).center())
+                        .padding(Padding::from([7, 18]))
+                        .style(primary_button)
+                        .on_press(Message::CloseVariables),
+                ],
+            ]
+            .spacing(10),
+        )
+        .padding(20)
+        .width(580)
+        .style(card_style);
+
+        let dim = opaque(
+            mouse_area(container(space()).width(Fill).height(Fill).style(|_| {
+                container::Style::default().background(Color::from_rgba(0.0, 0.0, 0.0, 0.55))
+            }))
+            .on_press(Message::CloseVariables)
+            .on_right_press(Message::CloseVariables),
+        );
+
+        Some(stack![dim, container(opaque(card)).center(Fill)].into())
     }
 
     fn auth_section<'a>(&'a self, req: &'a Request) -> Element<'a, Message> {

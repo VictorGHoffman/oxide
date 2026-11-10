@@ -6,6 +6,7 @@ mod model;
 mod postman;
 mod storage;
 mod theme;
+mod vars;
 mod view;
 
 use app::Oxide;

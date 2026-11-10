@@ -189,6 +189,9 @@ pub struct Request {
     pub api_key_name: String,
     pub api_key_value: String,
     pub api_key_in: ApiKeyLocation,
+
+    /// Post-response script: assigns response values to variables (see `vars`).
+    pub script: String,
 }
 
 impl Default for Request {
@@ -210,6 +213,7 @@ impl Default for Request {
             api_key_name: String::new(),
             api_key_value: String::new(),
             api_key_in: ApiKeyLocation::Header,
+            script: String::new(),
         }
     }
 }
@@ -237,6 +241,9 @@ pub struct Node {
     pub expanded: bool,
     pub kind: Kind,
     pub children: Vec<Node>,
+    /// Variables of a collection (empty for folders and requests).
+    #[serde(default)]
+    pub variables: Vec<KeyValue>,
 }
 
 impl Node {
@@ -466,6 +473,7 @@ impl Tree {
             expanded: true,
             kind: Kind::Collection,
             children: Vec::new(),
+            variables: blank_table(),
         });
         id
     }
@@ -492,6 +500,7 @@ impl Tree {
             expanded: true,
             kind,
             children: Vec::new(),
+            variables: Vec::new(),
         });
         Some(id)
     }

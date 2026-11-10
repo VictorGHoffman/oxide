@@ -1,7 +1,7 @@
 //! Postman Collection v2.1 import and export.
 //!
 //! Import also accepts v2.0 files (the item structure is the same). What Oxide
-//! cannot represent (scripts, variables, file uploads, GraphQL, ...) is skipped
+//! cannot represent (scripts, file uploads, GraphQL, ...) is skipped
 //! and reported back through [`Summary::warnings`].
 
 use std::collections::hash_map::DefaultHasher;
@@ -13,8 +13,6 @@ use serde_json::{json, Map, Value};
 use crate::model::*;
 
 pub const SCHEMA: &str = "https://schema.getpostman.com/json/collection/v2.1.0/collection.json";
-
-const VARIABLES_WARNING: &str = "variables like {{name}} are kept as text and are not resolved";
 
 /// What an import produced.
 pub struct Summary {
@@ -208,11 +206,11 @@ pub fn import(tree: &mut Tree, source: &str) -> Result<Summary, String> {
         warnings: Vec::new(),
     };
 
-    if items(&root, "variable")
-        .iter()
-        .any(|v| !text(v.get("key")).is_empty())
-    {
-        counter.warn(VARIABLES_WARNING);
+    // Collection variables come along.
+    let mut variables: Vec<KeyValue> = items(&root, "variable").iter().filter_map(kv).collect();
+    finish(&mut variables);
+    if let Some(node) = tree.get_mut(collection) {
+        node.variables = variables;
     }
     if !items(&root, "event").is_empty() {
         counter.warn("scripts (pre-request and tests) are ignored");
@@ -303,9 +301,6 @@ fn parse_request(value: &Value, inherited_auth: Option<&Value>, counter: &mut Co
     if let Some(url) = value.as_str() {
         set_url_from_string(&mut req, url);
         finish_all(&mut req);
-        if req.url.contains("{{") {
-            counter.warn(VARIABLES_WARNING);
-        }
         return req;
     }
 
@@ -347,9 +342,6 @@ fn parse_request(value: &Value, inherited_auth: Option<&Value>, counter: &mut Co
             }
         }
         _ => {}
-    }
-    if req.url.contains("{{") {
-        counter.warn(VARIABLES_WARNING);
     }
 
     // Headers. A `Cookie` header becomes rows of the Cookies tab.
@@ -490,6 +482,15 @@ pub fn export(collection: &Node) -> String {
             "schema": SCHEMA,
         },
         "item": export_items(&collection.children),
+        "variable": live(&collection.variables)
+            .map(|v| {
+                let mut entry = json!({ "key": v.key.trim(), "value": v.value, "type": "default" });
+                if !v.enabled {
+                    entry["disabled"] = Value::Bool(true);
+                }
+                entry
+            })
+            .collect::<Vec<Value>>(),
     });
     serde_json::to_string_pretty(&value).unwrap_or_default()
 }

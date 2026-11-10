@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::{Id, Tree};
+use crate::model::{Id, KeyValue, Tree};
 
 pub fn file_path() -> Option<PathBuf> {
     let documents =
@@ -48,6 +48,31 @@ pub fn save(tree: &Tree) -> Result<(), String> {
     }
 
     let json = serde_json::to_string_pretty(tree).map_err(|e| e.to_string())?;
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, json).map_err(|e| format!("Could not write {}: {e}", tmp.display()))?;
+    fs::rename(&tmp, &path).map_err(|e| format!("Could not save {}: {e}", path.display()))
+}
+
+// ───────────────────────────── global variables ─────────────────────────────
+
+fn globals_path() -> Option<PathBuf> {
+    file_path().map(|p| p.with_file_name("globals.json"))
+}
+
+/// The global variables (empty when none were saved yet or the file is unreadable).
+pub fn load_globals() -> Vec<KeyValue> {
+    globals_path()
+        .and_then(|path| fs::read_to_string(path).ok())
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_globals(globals: &[KeyValue]) -> Result<(), String> {
+    let path = globals_path().ok_or("Could not find the Documents folder.")?;
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir).map_err(|e| format!("Could not create {}: {e}", dir.display()))?;
+    }
+    let json = serde_json::to_string_pretty(globals).map_err(|e| e.to_string())?;
     let tmp = path.with_extension("json.tmp");
     fs::write(&tmp, json).map_err(|e| format!("Could not write {}: {e}", tmp.display()))?;
     fs::rename(&tmp, &path).map_err(|e| format!("Could not save {}: {e}", path.display()))

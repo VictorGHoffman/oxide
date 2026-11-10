@@ -10,6 +10,7 @@ use crate::model::*;
 use crate::postman;
 use crate::storage;
 use crate::theme;
+use crate::vars;
 
 pub const RENAME_ID: &str = "oxide-rename-input";
 pub const TABS_ID: &str = "oxide-tabs";
@@ -23,6 +24,7 @@ pub enum Section {
     Headers,
     Cookies,
     Auth,
+    Script,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,6 +48,15 @@ pub enum KvList {
     Cookies,
     FormData,
     UrlEncoded,
+    /// The variables of the open Variables dialog (not part of a request).
+    Vars,
+}
+
+/// Which set of variables the dialog is editing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VarScope {
+    Global,
+    Collection(Id),
 }
 
 /// Every edit that can happen on the request shown in the active tab.
@@ -59,6 +70,7 @@ pub enum Edit {
     KvRemove(KvList, usize),
     BodyKind(BodyKind),
     BodyAction(text_editor::Action),
+    ScriptAction(text_editor::Action),
     AuthKind(AuthKind),
     BearerToken(String),
     BasicUser(String),
@@ -81,6 +93,7 @@ pub enum MenuAction {
     CloseAll,
     ImportCollection,
     ExportCollection,
+    EditVariables,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,6 +144,10 @@ pub struct Drag {
 
 #[derive(Debug, Clone)]
 pub enum Message {
+    // Variables
+    OpenVariables(VarScope),
+    CloseVariables,
+
     // Layout
     ToggleTheme,
     SetTheme(theme::Choice),
@@ -222,10 +239,13 @@ pub struct Runtime {
     pub response_tab: ResponseTab,
     pub body_view: BodyView,
     pub response_editor: text_editor::Content,
+    pub script_editor: text_editor::Content,
+    /// What the post-response script did the last time it ran: `(is_error, text)`.
+    pub script_output: Vec<(bool, String)>,
 }
 
 impl Runtime {
-    fn new(body_text: &str) -> Self {
+    fn new(body_text: &str, script: &str) -> Self {
         Self {
             section: Section::Params,
             body_editor: text_editor::Content::with_text(body_text),
@@ -235,6 +255,8 @@ impl Runtime {
             response_tab: ResponseTab::Body,
             body_view: BodyView::Pretty,
             response_editor: text_editor::Content::new(),
+            script_editor: text_editor::Content::with_text(script),
+            script_output: Vec::new(),
         }
     }
 }
@@ -269,6 +291,10 @@ pub struct Oxide {
     pub notice: Option<Notice>,
     /// Index into [`theme::ENTRIES`].
     pub theme_index: usize,
+    /// Global variables (shared by all collections).
+    pub globals: Vec<KeyValue>,
+    /// The Variables dialog, when open.
+    pub vars_dialog: Option<VarScope>,
     pub sidebar_visible: bool,
     pub sidebar_width: f32,
     /// `true` = response docked on the right, `false` = below the editor.
@@ -309,6 +335,8 @@ impl Oxide {
             save_error,
             notice: None,
             theme_index: 0,
+            globals: storage::load_globals(),
+            vars_dialog: None,
             sidebar_visible: true,
             sidebar_width: 280.0,
             response_right: false,
@@ -536,7 +564,7 @@ impl Oxide {
             return;
         }
         if let Some(req) = self.tree.request(id) {
-            let rt = Runtime::new(&req.body_text);
+            let rt = Runtime::new(&req.body_text, &req.script);
             self.runtime.insert(id, rt);
         }
     }
@@ -761,6 +789,12 @@ impl Oxide {
                 self.notice = None;
                 return Task::perform(pick_collections(), Message::ImportPicked);
             }
+            MenuAction::EditVariables => {
+                if let Some(id) = node_target {
+                    let root = self.tree.ancestors(id).last().copied().unwrap_or(id);
+                    return self.update(Message::OpenVariables(VarScope::Collection(root)));
+                }
+            }
             MenuAction::ExportCollection => {
                 self.commit_rename();
                 self.notice = None;
@@ -825,6 +859,16 @@ impl Oxide {
                     rt.body_editor.perform(action);
                     if is_edit {
                         req.body_text = rt.body_editor.text();
+                    }
+                }
+                return is_edit;
+            }
+            Edit::ScriptAction(action) => {
+                let is_edit = action.is_edit();
+                if let Some(rt) = self.runtime.get_mut(&id) {
+                    rt.script_editor.perform(action);
+                    if is_edit {
+                        req.script = rt.script_editor.text();
                     }
                 }
                 return is_edit;
@@ -1016,6 +1060,15 @@ impl Oxide {
                 self.cursor = p;
                 self.apply_drag();
             }
+            Message::OpenVariables(scope) => {
+                self.menu = None;
+                self.commit_rename();
+                if let Some(table) = self.variables_mut(scope) {
+                    keep_trailing_blank(table);
+                }
+                self.vars_dialog = Some(scope);
+            }
+            Message::CloseVariables => self.vars_dialog = None,
             Message::ToggleTheme => self.theme_index = theme::opposite_of(self.theme_index),
             Message::SetTheme(choice) => self.theme_index = choice.0,
             Message::ToggleSidebar => self.sidebar_visible = !self.sidebar_visible,
@@ -1037,6 +1090,7 @@ impl Oxide {
             Message::WindowResized(size) => self.window_size = size,
 
             // ── Request editor ──
+            Message::Edit(edit) if is_variables_edit(&edit) => self.edit_variables(edit),
             Message::Edit(edit) => {
                 if let Some(id) = self.active {
                     if self.apply_edit(id, edit) {
@@ -1061,6 +1115,7 @@ impl Oxide {
                 }
             }
             Message::Response(id, token, result) => {
+                let mut succeeded = false;
                 if let Some(rt) = self.runtime.get_mut(&id) {
                     if rt.token == token && matches!(rt.state, ResponseState::Sending) {
                         rt.abort = None;
@@ -1070,10 +1125,14 @@ impl Oxide {
                                 rt.response_editor =
                                     text_editor::Content::with_text(&resp.body_pretty);
                                 rt.state = ResponseState::Done(Box::new(resp));
+                                succeeded = true;
                             }
                             Err(e) => rt.state = ResponseState::Failed(e),
                         }
                     }
+                }
+                if succeeded {
+                    self.run_script(id);
                 }
             }
 
@@ -1129,6 +1188,17 @@ impl Oxide {
             return Task::none();
         }
 
+        // The variables dialog is modal too (typing goes to its fields).
+        if self.vars_dialog.is_some() {
+            match shortcut {
+                Shortcut::Escape => self.vars_dialog = None,
+                Shortcut::FocusNext => return operation::focus_next(),
+                Shortcut::FocusPrevious => return operation::focus_previous(),
+                _ => {}
+            }
+            return Task::none();
+        }
+
         // While a name is being edited, only Escape is meaningful.
         if self.renaming.is_some() {
             if matches!(shortcut, Shortcut::Escape) {
@@ -1168,6 +1238,145 @@ impl Oxide {
         }
     }
 
+    // ───────────────────────── variables ─────────────────────────
+
+    /// The value of a variable for a request: its collection's variables win over the globals.
+    pub fn lookup_variable(&self, request: Id, name: &str) -> Option<String> {
+        let find = |rows: &[KeyValue]| {
+            rows.iter()
+                .rev()
+                .find(|r| r.enabled && r.key.trim() == name)
+                .map(|r| r.value.clone())
+        };
+        let root = self.tree.ancestors(request).last().copied();
+        root.and_then(|id| self.tree.get(id))
+            .and_then(|node| find(&node.variables))
+            .or_else(|| find(&self.globals))
+    }
+
+    fn variables_mut(&mut self, scope: VarScope) -> Option<&mut Vec<KeyValue>> {
+        match scope {
+            VarScope::Global => Some(&mut self.globals),
+            VarScope::Collection(id) => self.tree.get_mut(id).map(|n| &mut n.variables),
+        }
+    }
+
+    pub fn variables(&self, scope: VarScope) -> Option<&Vec<KeyValue>> {
+        match scope {
+            VarScope::Global => Some(&self.globals),
+            VarScope::Collection(id) => self.tree.get(id).map(|n| &n.variables),
+        }
+    }
+
+    /// Applies an edit made in the Variables dialog and saves it right away.
+    fn edit_variables(&mut self, edit: Edit) {
+        let Some(scope) = self.vars_dialog else {
+            return;
+        };
+        let Some(table) = self.variables_mut(scope) else {
+            return;
+        };
+
+        match edit {
+            Edit::KvToggle(_, i, on) => {
+                if let Some(row) = table.get_mut(i) {
+                    row.enabled = on;
+                }
+            }
+            Edit::KvKey(_, i, key) => {
+                if let Some(row) = table.get_mut(i) {
+                    row.key = key;
+                }
+                keep_trailing_blank(table);
+            }
+            Edit::KvValue(_, i, value) => {
+                if let Some(row) = table.get_mut(i) {
+                    row.value = value;
+                }
+                keep_trailing_blank(table);
+            }
+            Edit::KvRemove(_, i) => {
+                if i < table.len() {
+                    table.remove(i);
+                }
+                keep_trailing_blank(table);
+            }
+            _ => return,
+        }
+        self.save_variables(scope);
+    }
+
+    fn save_variables(&mut self, scope: VarScope) {
+        match scope {
+            VarScope::Global => {
+                if let Err(e) = storage::save_globals(&self.globals) {
+                    self.save_error = Some(e);
+                }
+            }
+            VarScope::Collection(_) => self.persist(),
+        }
+    }
+
+    /// Runs the request's post-response script on the response it just received.
+    fn run_script(&mut self, id: Id) {
+        let script = self
+            .tree
+            .request(id)
+            .map(|r| r.script.clone())
+            .unwrap_or_default();
+        if script.trim().is_empty() {
+            if let Some(rt) = self.runtime.get_mut(&id) {
+                rt.script_output.clear();
+            }
+            return;
+        }
+
+        let outcome = {
+            let Some(ResponseState::Done(resp)) = self.runtime.get(&id).map(|rt| &rt.state) else {
+                return;
+            };
+            vars::run_script(&script, resp, &|name| self.lookup_variable(id, name))
+        };
+
+        let root = self.tree.ancestors(id).last().copied().unwrap_or(id);
+        let mut output: Vec<(bool, String)> = Vec::new();
+        let (mut globals_changed, mut collection_changed) = (false, false);
+
+        for assignment in outcome.assignments {
+            let preview: String = assignment.value.chars().take(60).collect();
+            let preview = if assignment.value.chars().count() > 60 {
+                format!("{preview}…")
+            } else {
+                preview
+            };
+            match assignment.scope {
+                vars::Scope::Global => {
+                    set_variable(&mut self.globals, &assignment.name, assignment.value);
+                    globals_changed = true;
+                    output.push((false, format!("global.{} = {preview}", assignment.name)));
+                }
+                vars::Scope::Collection => {
+                    if let Some(node) = self.tree.get_mut(root) {
+                        set_variable(&mut node.variables, &assignment.name, assignment.value);
+                        collection_changed = true;
+                        output.push((false, format!("{} = {preview}", assignment.name)));
+                    }
+                }
+            }
+        }
+        output.extend(outcome.errors.into_iter().map(|e| (true, e)));
+
+        if globals_changed {
+            self.save_variables(VarScope::Global);
+        }
+        if collection_changed {
+            self.persist();
+        }
+        if let Some(rt) = self.runtime.get_mut(&id) {
+            rt.script_output = output;
+        }
+    }
+
     /// Resizes the panel whose border is being dragged.
     fn apply_drag(&mut self) {
         let Some(drag) = &self.drag else {
@@ -1204,14 +1413,26 @@ impl Oxide {
         let Some(id) = self.active else {
             return Task::none();
         };
-        let Some(request) = self.tree.request(id).cloned() else {
+        let Some(request) = self.tree.request(id) else {
             return Task::none();
         };
+        // {{variables}} are replaced just before sending; the saved request keeps them.
+        let request = vars::resolve(request, &|name| self.lookup_variable(id, name));
+        let undefined = vars::names_in(&request.url);
+
         self.ensure_runtime(id);
         let Some(rt) = self.runtime.get_mut(&id) else {
             return Task::none();
         };
         if matches!(rt.state, ResponseState::Sending) {
+            return Task::none();
+        }
+        if !undefined.is_empty() {
+            let list: Vec<String> = undefined.iter().map(|n| format!("{{{{{n}}}}}")).collect();
+            rt.state = ResponseState::Failed(format!(
+                "The URL uses undefined variable(s): {}. Define them under Variables.",
+                list.join(", ")
+            ));
             return Task::none();
         }
 
@@ -1238,7 +1459,42 @@ fn table_mut(req: &mut Request, list: KvList) -> &mut Vec<KeyValue> {
         KvList::Cookies => &mut req.cookies,
         KvList::FormData => &mut req.form_data,
         KvList::UrlEncoded => &mut req.url_encoded,
+        // Variables are edited through `edit_variables`, never through a request.
+        KvList::Vars => &mut req.params,
     }
+}
+
+fn is_variables_edit(edit: &Edit) -> bool {
+    matches!(
+        edit,
+        Edit::KvToggle(KvList::Vars, ..)
+            | Edit::KvKey(KvList::Vars, ..)
+            | Edit::KvValue(KvList::Vars, ..)
+            | Edit::KvRemove(KvList::Vars, ..)
+    )
+}
+
+/// Sets `name` to `value`, adding the variable above the trailing blank row if needed.
+fn set_variable(rows: &mut Vec<KeyValue>, name: &str, value: String) {
+    if let Some(row) = rows.iter_mut().find(|r| r.key.trim() == name) {
+        row.value = value;
+        row.enabled = true;
+    } else {
+        let at = if rows.last().is_some_and(KeyValue::is_blank) {
+            rows.len() - 1
+        } else {
+            rows.len()
+        };
+        rows.insert(
+            at,
+            KeyValue {
+                enabled: true,
+                key: name.to_string(),
+                value,
+            },
+        );
+    }
+    keep_trailing_blank(rows);
 }
 
 fn keep_trailing_blank(table: &mut Vec<KeyValue>) {
