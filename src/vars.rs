@@ -88,6 +88,37 @@ pub fn names_in(text: &str) -> Vec<String> {
     names
 }
 
+/// A piece of text: plain, or a `{{variable}}` reference.
+pub enum Piece<'a> {
+    Text(&'a str),
+    Variable { raw: &'a str, name: &'a str },
+}
+
+/// Splits `text` into plain text and `{{variable}}` references (in order, nothing lost).
+pub fn pieces(text: &str) -> Vec<Piece<'_>> {
+    let mut out = Vec::new();
+    let mut rest = text;
+
+    while let Some(start) = rest.find("{{") {
+        let after = &rest[start + 2..];
+        let Some(end) = after.find("}}") else {
+            break;
+        };
+        if start > 0 {
+            out.push(Piece::Text(&rest[..start]));
+        }
+        out.push(Piece::Variable {
+            raw: &rest[start..start + 2 + end + 2],
+            name: after[..end].trim(),
+        });
+        rest = &after[end + 2..];
+    }
+    if !rest.is_empty() {
+        out.push(Piece::Text(rest));
+    }
+    out
+}
+
 /// A copy of `req` with every variable replaced.
 pub fn resolve(req: &Request, lookup: Lookup) -> Request {
     let sub = |s: &str| substitute(s, lookup);
@@ -352,6 +383,20 @@ mod tests {
             "https://api.test/{{missing}}"
         );
         assert_eq!(substitute("{{open", &none), "{{open");
+    }
+
+    #[test]
+    fn pieces_keep_all_the_text() {
+        let text = "a {{x}} b{{ y }}{{z";
+        let joined: String = pieces(text)
+            .iter()
+            .map(|p| match p {
+                Piece::Text(t) => *t,
+                Piece::Variable { raw, .. } => *raw,
+            })
+            .collect();
+        assert_eq!(joined, text);
+        assert!(matches!(pieces(text)[1], Piece::Variable { name: "x", .. }));
     }
 
     #[test]

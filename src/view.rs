@@ -3,15 +3,17 @@
 use iced::font::{self, Font};
 use iced::mouse::Interaction;
 use iced::widget::{
-    button, checkbox, column, container, mouse_area, opaque, pick_list, radio, row, scrollable,
+    button, rich_text, span, checkbox, column, container, mouse_area, opaque, pick_list, radio, row, scrollable,
     space, stack, text, text_editor, text_input, tooltip, Column, Row,
 };
-use iced::{color, Border, Color, Element, Fill, Length, Padding, Theme};
+use iced::{color, Background, Border, Color, Element, Fill, Length, Padding, Theme};
 
 use crate::app::*;
+use crate::highlight;
 use crate::http::{format_duration, format_size};
 use crate::model::*;
 use crate::theme;
+use crate::vars;
 
 // ───────────────────────────── palette helpers ─────────────────────────────
 
@@ -301,6 +303,26 @@ fn tab_indents(
             iced::keyboard::Key::Named(iced::keyboard::key::Named::Tab)
         );
         let focused = matches!(key_press.status, text_editor::Status::Focused { .. });
+
+        // Ctrl+Backspace / Ctrl+Delete remove a whole word (Alt on macOS).
+        if focused && key_press.modifiers.jump() && !key_press.modifiers.shift() {
+            use text_editor::{Binding, Motion};
+            match key_press.key.as_ref() {
+                iced::keyboard::Key::Named(iced::keyboard::key::Named::Backspace) => {
+                    return Some(Binding::Sequence(vec![
+                        Binding::Select(Motion::WordLeft),
+                        Binding::Backspace,
+                    ]));
+                }
+                iced::keyboard::Key::Named(iced::keyboard::key::Named::Delete) => {
+                    return Some(Binding::Sequence(vec![
+                        Binding::Select(Motion::WordRight),
+                        Binding::Delete,
+                    ]));
+                }
+                _ => {}
+            }
+        }
 
         if is_tab && focused {
             let edit = if key_press.modifiers.shift() {
@@ -1387,11 +1409,15 @@ impl Oxide {
             style
         });
 
-        let url = text_input("Enter URL", &req.url)
-            .style(input_style)
-            .on_input(|s| Message::Edit(Edit::Url(s)))
-            .on_submit(Message::Send)
-            .padding(8);
+        let url = self.var_input(
+            "Enter URL",
+            &req.url,
+            16.0,
+            8.0,
+            self.editor_width() - 125.0 - 90.0 - 16.0,
+            |s| Message::Edit(Edit::Url(s)),
+            Some(Message::Send),
+        );
 
         let action = if sending {
             button(text("Cancel").center())
@@ -1495,9 +1521,9 @@ impl Oxide {
 
     fn section_content<'a>(&'a self, req: &'a Request, rt: &'a Runtime) -> Element<'a, Message> {
         match rt.section {
-            Section::Params => kv_table(KvList::Params, &req.params, "Key", "Value"),
-            Section::Headers => kv_table(KvList::Headers, &req.headers, "Header", "Value"),
-            Section::Cookies => kv_table(KvList::Cookies, &req.cookies, "Cookie name", "Value"),
+            Section::Params => kv_table(Some(self), KvList::Params, &req.params, "Key", "Value"),
+            Section::Headers => kv_table(Some(self), KvList::Headers, &req.headers, "Header", "Value"),
+            Section::Cookies => kv_table(Some(self), KvList::Cookies, &req.cookies, "Cookie name", "Value"),
             Section::Body => self.body_section(req, rt),
             Section::Auth => self.auth_section(req),
             Section::Script => self.script_section(rt),
@@ -1522,8 +1548,8 @@ impl Oxide {
                     .size(13)
                     .style(muted),
             ),
-            BodyKind::FormData => kv_table(KvList::FormData, &req.form_data, "Key", "Value"),
-            BodyKind::UrlEncoded => kv_table(KvList::UrlEncoded, &req.url_encoded, "Key", "Value"),
+            BodyKind::FormData => kv_table(Some(self), KvList::FormData, &req.form_data, "Key", "Value"),
+            BodyKind::UrlEncoded => kv_table(Some(self), KvList::UrlEncoded, &req.url_encoded, "Key", "Value"),
             BodyKind::Json | BodyKind::Xml | BodyKind::Text => {
                 let placeholder = match req.body_kind {
                     BodyKind::Json => "{\n  \"hello\": \"world\"\n}",
@@ -1536,7 +1562,10 @@ impl Oxide {
                     _ => "txt",
                 };
                 text_editor(&rt.body_editor)
-                    .highlight(syntax, self.highlight_theme())
+                    .highlight_with::<highlight::Highlighter>(
+                        self.highlight_settings(syntax),
+                        highlight::to_format,
+                    )
                     .style(editor_style)
                     .placeholder(placeholder)
                     .on_action(|a| Message::Edit(Edit::BodyAction(a)))
@@ -1550,6 +1579,145 @@ impl Oxide {
         };
 
         column![kinds, content].spacing(10).height(Fill).into()
+    }
+
+    /// Approximate width of the request editor's content, in pixels.
+    pub fn editor_width(&self) -> f32 {
+        let sidebar = if self.sidebar_visible {
+            self.sidebar_width + GRAB
+        } else {
+            34.0 + GRAB
+        };
+        let dock = if self.response_right {
+            self.response_width + GRAB
+        } else {
+            0.0
+        };
+        (self.window_size.width - 16.0 - sidebar - dock - 24.0).max(200.0)
+    }
+
+    /// Approximate width of a field in the Auth tab (they sit next to a label).
+    fn auth_width(&self) -> f32 {
+        self.editor_width().min(640.0) - 110.0
+    }
+
+    /// A one-line field that paints `{{variables}}` (orange when defined, red when not)
+    /// and shows their values when hovered.
+    ///
+    /// iced cannot colour part of a text input, so the coloured text is drawn *under* an
+    /// input whose own text is transparent. That only lines up while the text is not
+    /// scrolled, so when it might not fit in `width` pixels the plain field is used.
+    #[allow(clippy::too_many_arguments)]
+    fn var_input<'a>(
+        &'a self,
+        placeholder: &str,
+        value: &str,
+        size: f32,
+        padding: f32,
+        width: f32,
+        on_input: impl Fn(String) -> Message + 'a,
+        on_submit: Option<Message>,
+    ) -> Element<'a, Message> {
+        let mut input = text_input(placeholder, value)
+            .on_input(on_input)
+            .size(size)
+            .padding(padding);
+        if let Some(message) = on_submit {
+            input = input.on_submit(message);
+        }
+
+        let pieces = vars::pieces(value);
+        let has_variables = pieces
+            .iter()
+            .any(|p| matches!(p, vars::Piece::Variable { .. }));
+        let fits = value.chars().count() as f32 * size * 0.62 < width - 2.0 * padding - 8.0;
+
+        let Some(request) = self.active.filter(|_| has_variables && fits) else {
+            return input.style(input_style).into();
+        };
+
+        let palette = self.theme().palette();
+        let mut spans: Vec<iced::widget::text::Span<'a, (), Font>> = Vec::new();
+        let mut tips: Vec<Element<'a, Message>> = Vec::new();
+        let mut seen: Vec<&str> = Vec::new();
+
+        for piece in &pieces {
+            match piece {
+                vars::Piece::Text(plain) => spans.push(span(plain.to_string())),
+                vars::Piece::Variable { raw, name } => {
+                    let found = self.lookup_variable_in_scope(request, name);
+                    let color = if found.is_some() {
+                        palette.primary
+                    } else {
+                        palette.danger
+                    };
+                    spans.push(span(raw.to_string()).color(color));
+
+                    if !seen.contains(name) {
+                        seen.push(name);
+                        let line = match found {
+                            Some((value, scope)) => {
+                                let shown: String = value.chars().take(120).collect();
+                                let more = if value.chars().count() > 120 { "…" } else { "" };
+                                text(format!("{{{{{name}}}}} = {shown}{more}   ({scope})"))
+                                    .size(12)
+                            }
+                            None => text(format!("{{{{{name}}}}} is not defined"))
+                                .size(12)
+                                .color(palette.danger),
+                        };
+                        tips.push(line.into());
+                    }
+                }
+            }
+        }
+
+        let underlay = container(rich_text(spans).size(size))
+            .padding(padding)
+            .width(Fill)
+            .style(|theme: &Theme| {
+                let base = text_input::default(theme, text_input::Status::Active);
+                container::Style {
+                    background: Some(base.background),
+                    border: Border {
+                        radius: RADIUS_MD.into(),
+                        ..Border::default()
+                    },
+                    ..container::Style::default()
+                }
+            });
+
+        let input = input.style(|theme: &Theme, status| {
+            let mut style = input_style(theme, status);
+            style.background = Background::Color(Color::TRANSPARENT);
+            style.value = Color::TRANSPARENT;
+            style
+        });
+
+        tooltip(
+            stack![underlay, input],
+            container(Column::with_children(tips).spacing(3))
+                .padding(Padding::from([6, 10]))
+                .style(card_style),
+            tooltip::Position::FollowCursor,
+        )
+        .gap(14)
+        .delay(std::time::Duration::from_millis(250))
+        .into()
+    }
+
+    /// Highlighting of the body editor: JSON / XML colours plus `{{variables}}`.
+    fn highlight_settings(&self, token: &str) -> highlight::Settings {
+        let palette = self.theme().palette();
+        highlight::Settings {
+            syntax: iced::highlighter::Settings {
+                theme: self.highlight_theme(),
+                token: token.to_string(),
+            },
+            defined: self.defined_variables(),
+            defined_color: palette.primary,
+            undefined_color: palette.danger,
+        }
     }
 
     /// Colours for the syntax highlighting of the body and response editors.
@@ -1628,7 +1796,7 @@ impl Oxide {
                 text("Use {{name}} in the URL, params, headers, cookies, body and auth. A request's Script tab can fill them from a response.")
                     .size(12)
                     .style(muted),
-                container(kv_table(KvList::Vars, rows, "Variable", "Value")).height(300),
+                container(kv_table(None, KvList::Vars, rows, "Variable", "Value")).height(300),
                 row![
                     space().width(Fill),
                     button(text("Close").size(13).center())
@@ -1672,18 +1840,28 @@ impl Oxide {
                 .into(),
             AuthKind::Bearer => labeled(
                 "Token",
-                text_input("Token", &req.bearer_token)
-                    .style(input_style)
-                    .on_input(|s| Message::Edit(Edit::BearerToken(s)))
-                    .padding(6),
+                self.var_input(
+                    "Token",
+                    &req.bearer_token,
+                    16.0,
+                    6.0,
+                    self.auth_width(),
+                    |s| Message::Edit(Edit::BearerToken(s)),
+                    None,
+                ),
             ),
             AuthKind::Basic => column![
                 labeled(
                     "Username",
-                    text_input("Username", &req.basic_user)
-                        .style(input_style)
-                        .on_input(|s| Message::Edit(Edit::BasicUser(s)))
-                        .padding(6),
+                    self.var_input(
+                        "Username",
+                        &req.basic_user,
+                        16.0,
+                        6.0,
+                        self.auth_width(),
+                        |s| Message::Edit(Edit::BasicUser(s)),
+                        None,
+                    ),
                 ),
                 labeled(
                     "Password",
@@ -1699,17 +1877,27 @@ impl Oxide {
             AuthKind::ApiKey => column![
                 labeled(
                     "Key",
-                    text_input("Key", &req.api_key_name)
-                        .style(input_style)
-                        .on_input(|s| Message::Edit(Edit::ApiKeyName(s)))
-                        .padding(6),
+                    self.var_input(
+                        "Key",
+                        &req.api_key_name,
+                        16.0,
+                        6.0,
+                        self.auth_width(),
+                        |s| Message::Edit(Edit::ApiKeyName(s)),
+                        None,
+                    ),
                 ),
                 labeled(
                     "Value",
-                    text_input("Value", &req.api_key_value)
-                        .style(input_style)
-                        .on_input(|s| Message::Edit(Edit::ApiKeyValue(s)))
-                        .padding(6),
+                    self.var_input(
+                        "Value",
+                        &req.api_key_value,
+                        16.0,
+                        6.0,
+                        self.auth_width(),
+                        |s| Message::Edit(Edit::ApiKeyValue(s)),
+                        None,
+                    ),
                 ),
                 labeled(
                     "Add to",
@@ -1945,6 +2133,7 @@ fn info_row<'a>(name: &str, value: &str) -> Element<'a, Message> {
 // ───────────────────────────── key/value table ─────────────────────────────
 
 fn kv_table<'a>(
+    app: Option<&'a Oxide>,
     list: KvList,
     rows: &'a [KeyValue],
     key_placeholder: &'static str,
@@ -1965,6 +2154,9 @@ fn kv_table<'a>(
         space().width(30),
     ]
     .spacing(8);
+
+    // Approximate width of one text cell (used to decide whether the variable colours fit).
+    let cell_width = app.map_or(0.0, |a| ((a.editor_width() - 120.0) / 2.0).max(0.0));
 
     let body = rows.iter().enumerate().map(|(i, kv)| {
         let is_last = i + 1 == rows.len();
@@ -1989,20 +2181,42 @@ fn kv_table<'a>(
                 .into()
         };
 
-        row![
-            toggle,
-            text_input(key_placeholder, &kv.key)
+        let key_input: Element<'a, Message> = match app {
+            Some(app) => app.var_input(
+                key_placeholder,
+                &kv.key,
+                13.0,
+                6.0,
+                cell_width,
+                move |s| Message::Edit(Edit::KvKey(list, i, s)),
+                None,
+            ),
+            None => text_input(key_placeholder, &kv.key)
                 .style(input_style)
                 .on_input(move |s| Message::Edit(Edit::KvKey(list, i, s)))
                 .size(13)
-                .padding(6),
-            text_input(value_placeholder, &kv.value)
+                .padding(6)
+                .into(),
+        };
+        let value_input: Element<'a, Message> = match app {
+            Some(app) => app.var_input(
+                value_placeholder,
+                &kv.value,
+                13.0,
+                6.0,
+                cell_width,
+                move |s| Message::Edit(Edit::KvValue(list, i, s)),
+                None,
+            ),
+            None => text_input(value_placeholder, &kv.value)
                 .style(input_style)
                 .on_input(move |s| Message::Edit(Edit::KvValue(list, i, s)))
                 .size(13)
-                .padding(6),
-            remove,
-        ]
+                .padding(6)
+                .into(),
+        };
+
+        row![toggle, key_input, value_input, remove]
         .spacing(8)
         .align_y(iced::Center)
         .into()

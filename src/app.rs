@@ -1409,7 +1409,42 @@ impl Oxide {
     // ───────────────────────── variables ─────────────────────────
 
     /// The value of a variable for a request: its collection's variables win over the globals.
+    /// Names of the enabled variables the active request can use (collection and global).
+    pub fn defined_variables(&self) -> Vec<String> {
+        let mut names: Vec<String> = Vec::new();
+        let mut add = |rows: &[KeyValue]| {
+            for row in rows
+                .iter()
+                .filter(|r| r.enabled && !r.key.trim().is_empty())
+            {
+                let name = row.key.trim().to_string();
+                if !names.contains(&name) {
+                    names.push(name);
+                }
+            }
+        };
+        if let Some(root) = self
+            .active
+            .and_then(|id| self.tree.ancestors(id).last().copied())
+            .and_then(|id| self.tree.get(id))
+        {
+            add(&root.variables);
+        }
+        add(&self.globals);
+        names.sort();
+        names
+    }
+
     pub fn lookup_variable(&self, request: Id, name: &str) -> Option<String> {
+        self.lookup_variable_in_scope(request, name).map(|(v, _)| v)
+    }
+
+    /// Like [`Self::lookup_variable`], also telling where the value came from.
+    pub fn lookup_variable_in_scope(
+        &self,
+        request: Id,
+        name: &str,
+    ) -> Option<(String, &'static str)> {
         let find = |rows: &[KeyValue]| {
             rows.iter()
                 .rev()
@@ -1419,7 +1454,8 @@ impl Oxide {
         let root = self.tree.ancestors(request).last().copied();
         root.and_then(|id| self.tree.get(id))
             .and_then(|node| find(&node.variables))
-            .or_else(|| find(&self.globals))
+            .map(|v| (v, "collection"))
+            .or_else(|| find(&self.globals).map(|v| (v, "global")))
     }
 
     fn variables_mut(&mut self, scope: VarScope) -> Option<&mut Vec<KeyValue>> {
