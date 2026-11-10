@@ -1,6 +1,7 @@
 //! Application state, messages and the `update` logic.
 
 use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
 
 use iced::widget::{operation, scrollable, text_editor};
 use iced::{event, keyboard, mouse, window, Event, Point, Size, Subscription, Task, Theme};
@@ -15,6 +16,11 @@ use crate::vars;
 pub const RENAME_ID: &str = "oxide-rename-input";
 pub const TABS_ID: &str = "oxide-tabs";
 /// Width of a tab plus the gap before the next one (used to turn a drag distance into a position).
+/// How many undo steps are kept per request.
+const HISTORY_LIMIT: usize = 100;
+/// Edits closer together than this count as one undo step (typing a word, ...).
+const HISTORY_MERGE: Duration = Duration::from_millis(700);
+
 pub const TAB_STRIDE: f32 = 196.0;
 pub const SEARCH_ID: &str = "oxide-search";
 
@@ -134,6 +140,8 @@ pub enum Shortcut {
     FocusPrevious,
     ToggleSidebar,
     FocusSearch,
+    Undo,
+    Redo,
 }
 
 /// A draggable border between two panels.
@@ -264,6 +272,11 @@ pub struct Runtime {
     pub script_editor: text_editor::Content,
     /// What the post-response script did the last time it ran: `(is_error, text)`.
     pub script_output: Vec<(bool, String)>,
+    /// Earlier versions of the request (most recent last) for Ctrl+Z.
+    pub undo: Vec<Request>,
+    /// Versions undone, for Ctrl+Y.
+    pub redo: Vec<Request>,
+    pub last_edit: Option<Instant>,
 }
 
 impl Runtime {
@@ -279,6 +292,9 @@ impl Runtime {
             response_editor: text_editor::Content::new(),
             script_editor: text_editor::Content::with_text(script),
             script_output: Vec::new(),
+            undo: Vec::new(),
+            redo: Vec::new(),
+            last_edit: None,
         }
     }
 }
@@ -1219,8 +1235,10 @@ impl Oxide {
             Message::Edit(edit) if is_variables_edit(&edit) => self.edit_variables(edit),
             Message::Edit(edit) => {
                 if let Some(id) = self.active {
+                    let before = self.tree.request(id).cloned();
                     if self.apply_edit(id, edit) {
                         self.pin(id); // editing a preview tab keeps it open
+                        self.record_history(id, before);
                     }
                 }
             }
@@ -1369,6 +1387,14 @@ impl Oxide {
             Shortcut::Confirm => Task::none(),
             Shortcut::Save => {
                 self.save_active();
+                Task::none()
+            }
+            Shortcut::Undo => {
+                self.step_history(false);
+                Task::none()
+            }
+            Shortcut::Redo => {
+                self.step_history(true);
                 Task::none()
             }
             Shortcut::ToggleSidebar => {
@@ -1543,8 +1569,76 @@ impl Oxide {
         }
     }
 
+    /// Remembers the state before an edit so Ctrl+Z can bring it back.
+    fn record_history(&mut self, id: Id, before: Option<Request>) {
+        let Some(before) = before else {
+            return;
+        };
+        if self.tree.request(id).is_none_or(|now| *now == before) {
+            return;
+        }
+        let Some(rt) = self.runtime.get_mut(&id) else {
+            return;
+        };
+
+        let burst = rt.last_edit.is_some_and(|t| t.elapsed() < HISTORY_MERGE);
+        rt.last_edit = Some(Instant::now());
+        rt.redo.clear();
+        if burst && !rt.undo.is_empty() {
+            return; // part of the step that is already recorded
+        }
+        rt.undo.push(before);
+        if rt.undo.len() > HISTORY_LIMIT {
+            rt.undo.remove(0);
+        }
+    }
+
+    /// Ctrl+Z (`redo == false`) / Ctrl+Y (`redo == true`) on the active request.
+    fn step_history(&mut self, redo: bool) {
+        let Some(id) = self.active else {
+            return;
+        };
+        let Some(current) = self.tree.request(id).cloned() else {
+            return;
+        };
+        let Some(rt) = self.runtime.get_mut(&id) else {
+            return;
+        };
+
+        let target = if redo { rt.redo.pop() } else { rt.undo.pop() };
+        let Some(target) = target else {
+            return;
+        };
+        if redo {
+            rt.undo.push(current);
+        } else {
+            rt.redo.push(current);
+        }
+        rt.last_edit = None;
+
+        // The text editors keep their own copy of the text: rebuild them when it differs.
+        let rebuild = |content: &mut text_editor::Content, text: &str| {
+            if content.text() != text {
+                *content = text_editor::Content::with_text(text);
+                content.perform(text_editor::Action::Move(text_editor::Motion::DocumentEnd));
+            }
+        };
+        rebuild(&mut rt.body_editor, &target.body_text);
+        rebuild(&mut rt.script_editor, &target.script);
+
+        if let Some(req) = self.tree.request_mut(id) {
+            *req = target;
+        }
+        self.pin(id);
+    }
+
     /// Drops the unsaved edits of a request (used when its tab is closed).
     fn revert_request(&mut self, id: Id) {
+        if let Some(rt) = self.runtime.get_mut(&id) {
+            rt.undo.clear();
+            rt.redo.clear();
+            rt.last_edit = None;
+        }
         let Some(saved) = self.saved.get(&id).cloned() else {
             return;
         };
@@ -1802,6 +1896,8 @@ fn shortcut_for(
         ('d', false) => Some(Shortcut::Duplicate),
         ('w', false) => Some(Shortcut::CloseTab),
         ('s', false) => Some(Shortcut::Save),
+        ('z', false) => Some(Shortcut::Undo),
+        ('z', true) | ('y', false) => Some(Shortcut::Redo),
         ('b', false) => Some(Shortcut::ToggleSidebar),
         ('f', false) => Some(Shortcut::FocusSearch),
         (c @ '1'..='9', false) => Some(Shortcut::GoToTab(c as usize - '1' as usize)),

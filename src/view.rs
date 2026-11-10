@@ -1276,6 +1276,7 @@ impl Oxide {
                 hint("Ctrl+N", "New request"),
                 hint("Ctrl+Shift+N", "New folder"),
                 hint("Ctrl+S", "Save request"),
+                hint("Ctrl+Z / Ctrl+Y", "Undo / redo"),
                 hint("Ctrl+B", "Show / hide sidebar"),
                 hint("Ctrl+F", "Search requests"),
                 hint("Ctrl+D", "Duplicate"),
