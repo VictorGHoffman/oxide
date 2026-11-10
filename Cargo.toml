@@ -5,7 +5,7 @@ edition = "2021"
 description = "Oxide - a lightweight HTTP client"
 
 [dependencies]
-iced = { version = "0.14", features = ["tokio", "advanced", "image-without-codecs"] }
+iced = { version = "0.14", features = ["tokio", "advanced", "highlighter", "image-without-codecs"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "multipart", "gzip", "brotli", "deflate"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 serde = { version = "1", features = ["derive"] }

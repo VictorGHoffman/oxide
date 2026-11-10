@@ -315,6 +315,38 @@ fn tab_indents(
     }
 }
 
+/// Bodies bigger than this are shown without colours (highlighting them would be slow).
+const HIGHLIGHT_LIMIT: usize = 400_000;
+
+/// Which syntax to colour a response with, from its content type or, failing that, its shape.
+fn response_syntax(resp: &crate::http::Response) -> &'static str {
+    if resp.body_raw.len() > HIGHLIGHT_LIMIT {
+        return "txt";
+    }
+    let kind = resp
+        .header("content-type")
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let start = resp.body_raw.trim_start();
+    let lower_start: String = start.chars().take(15).collect::<String>().to_lowercase();
+
+    if kind.contains("json") {
+        "json"
+    } else if kind.contains("html") {
+        "html"
+    } else if kind.contains("xml") {
+        "xml"
+    } else if start.starts_with('{') || start.starts_with('[') {
+        "json"
+    } else if lower_start.starts_with("<!doctype html") || lower_start.starts_with("<html") {
+        "html"
+    } else if start.starts_with('<') {
+        "xml"
+    } else {
+        "txt"
+    }
+}
+
 /// A "+" drawn from two bars, so it is exactly centred (a text glyph sits low).
 fn plus_icon<'a>() -> Element<'a, Message> {
     let bar = |width: f32, height: f32| {
@@ -1497,7 +1529,13 @@ impl Oxide {
                     BodyKind::Xml => "<root>\n  <hello>world</hello>\n</root>",
                     _ => "Plain text body",
                 };
+                let syntax = match req.body_kind {
+                    BodyKind::Json => "json",
+                    BodyKind::Xml => "xml",
+                    _ => "txt",
+                };
                 text_editor(&rt.body_editor)
+                    .highlight(syntax, self.highlight_theme())
                     .style(editor_style)
                     .placeholder(placeholder)
                     .on_action(|a| Message::Edit(Edit::BodyAction(a)))
@@ -1511,6 +1549,15 @@ impl Oxide {
         };
 
         column![kinds, content].spacing(10).height(Fill).into()
+    }
+
+    /// Colours for the syntax highlighting of the body and response editors.
+    fn highlight_theme(&self) -> iced::highlighter::Theme {
+        if self.theme().extended_palette().is_dark {
+            iced::highlighter::Theme::Base16Mocha
+        } else {
+            iced::highlighter::Theme::InspiredGitHub
+        }
     }
 
     fn script_section<'a>(&'a self, rt: &'a Runtime) -> Element<'a, Message> {
@@ -1794,6 +1841,7 @@ impl Oxide {
                     centered(text("This response has no body").size(13).style(muted))
                 } else {
                     text_editor(&rt.response_editor)
+                        .highlight(response_syntax(resp), self.highlight_theme())
                         .style(editor_style)
                         .on_action(Message::ResponseAction)
                         .font(Font::MONOSPACE)
