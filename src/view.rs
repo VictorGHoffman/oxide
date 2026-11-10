@@ -279,11 +279,16 @@ impl Oxide {
         let header = row![
             text("COLLECTIONS").size(11).font(BOLD).style(muted),
             space().width(Fill),
+            button(text("Import").size(11))
+                .padding(Padding::from([2, 8]))
+                .style(icon_button_style)
+                .on_press(Message::MenuAction(MenuAction::ImportCollection)),
             button(text("+").size(16))
                 .padding(Padding::from([0, 8]))
                 .style(icon_button_style)
                 .on_press(Message::NewCollection),
         ]
+        .spacing(4)
         .align_y(iced::Center)
         .padding(Padding::from([8, 12]));
 
@@ -314,6 +319,28 @@ impl Oxide {
                     text(format!("Could not save: {error}"))
                         .size(12)
                         .color(color!(0xe5534b)),
+                )
+                .padding(10)
+                .width(Fill),
+            );
+        }
+
+        if let Some(notice) = &self.notice {
+            let tint = if notice.error {
+                color!(0xe5534b)
+            } else {
+                color!(0x4caf7d)
+            };
+            sidebar = sidebar.push(
+                container(
+                    row![
+                        text(notice.text.clone()).size(12).color(tint).width(Fill),
+                        button(text("×").size(14))
+                            .padding(Padding::from([0, 6]))
+                            .style(icon_button_style)
+                            .on_press(Message::DismissNotice),
+                    ]
+                    .spacing(6),
                 )
                 .padding(10)
                 .width(Fill),
@@ -443,15 +470,39 @@ impl Oxide {
                     false,
                 ),
                 Separator,
+                Item(
+                    "Import Collection…",
+                    None,
+                    MenuAction::ImportCollection,
+                    true,
+                    false,
+                ),
+                Item(
+                    "Export Collection…",
+                    None,
+                    MenuAction::ExportCollection,
+                    true,
+                    false,
+                ),
+                Separator,
                 Item("Delete", Some("Del"), MenuAction::Delete, true, true),
             ],
-            MenuTarget::Empty => vec![Item(
-                "New Collection",
-                None,
-                MenuAction::NewCollection,
-                true,
-                false,
-            )],
+            MenuTarget::Empty => vec![
+                Item(
+                    "New Collection",
+                    None,
+                    MenuAction::NewCollection,
+                    true,
+                    false,
+                ),
+                Item(
+                    "Import Collection…",
+                    None,
+                    MenuAction::ImportCollection,
+                    true,
+                    false,
+                ),
+            ],
             MenuTarget::Tab(_) => vec![
                 Item("Close", Some("Ctrl+W"), MenuAction::CloseTab, true, false),
                 Item(

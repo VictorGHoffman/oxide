@@ -3,6 +3,7 @@
 mod app;
 mod http;
 mod model;
+mod postman;
 mod storage;
 mod theme;
 mod view;

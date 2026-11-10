@@ -7,6 +7,7 @@ use iced::{event, keyboard, mouse, window, Event, Point, Size, Subscription, Tas
 
 use crate::http;
 use crate::model::*;
+use crate::postman;
 use crate::storage;
 
 pub const RENAME_ID: &str = "oxide-rename-input";
@@ -77,6 +78,8 @@ pub enum MenuAction {
     CloseTab,
     CloseOthers,
     CloseAll,
+    ImportCollection,
+    ExportCollection,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,6 +113,13 @@ pub enum Shortcut {
 
 #[derive(Debug, Clone)]
 pub enum Message {
+    // Import / export
+    /// `(file name, file contents)` for every file picked; empty when cancelled.
+    ImportPicked(Result<Vec<(String, String)>, String>),
+    /// `Some(file name)` once written, `None` when the dialog was cancelled.
+    ExportDone(Result<Option<String>, String>),
+    DismissNotice,
+
     // Sidebar
     SelectNode(Id),
     OpenPinned(Id),
@@ -203,6 +213,12 @@ impl Runtime {
     }
 }
 
+/// A short message about an import/export shown at the bottom of the sidebar.
+pub struct Notice {
+    pub text: String,
+    pub error: bool,
+}
+
 pub struct Oxide {
     pub tree: Tree,
     pub selected: Option<Id>,
@@ -219,6 +235,7 @@ pub struct Oxide {
     /// Nodes waiting for the user to confirm their deletion.
     pub confirm_delete: Option<Vec<Id>>,
     pub save_error: Option<String>,
+    pub notice: Option<Notice>,
     /// Selected nodes besides the primary one (`selected`).
     pub extra: HashSet<Id>,
     /// Where a Shift+click range starts.
@@ -250,6 +267,7 @@ impl Oxide {
             saved: HashMap::new(),
             confirm_delete: None,
             save_error,
+            notice: None,
             extra: HashSet::new(),
             anchor: selected,
             modifiers: keyboard::Modifiers::default(),
@@ -683,6 +701,27 @@ impl Oxide {
                 }
             }
             MenuAction::CloseAll => self.close_all_tabs(),
+            MenuAction::ImportCollection => {
+                self.commit_rename();
+                self.notice = None;
+                return Task::perform(pick_collections(), Message::ImportPicked);
+            }
+            MenuAction::ExportCollection => {
+                self.commit_rename();
+                self.notice = None;
+                // Exporting from anywhere inside a collection exports the whole collection.
+                let root =
+                    node_target.map(|id| self.tree.ancestors(id).last().copied().unwrap_or(id));
+                let Some(collection) = root.and_then(|id| self.tree.get(id)) else {
+                    return Task::none();
+                };
+                let file_name = format!(
+                    "{}.postman_collection.json",
+                    safe_file_name(&collection.name)
+                );
+                let json = postman::export(collection);
+                return Task::perform(save_collection(file_name, json), Message::ExportDone);
+            }
         }
         Task::none()
     }
@@ -860,6 +899,47 @@ impl Oxide {
                     Some(MenuTarget::Empty) | None => self.perform(action, None),
                 };
             }
+            Message::ImportPicked(result) => match result {
+                Err(e) => {
+                    self.notice = Some(Notice {
+                        text: format!("Import failed: {e}"),
+                        error: true,
+                    });
+                }
+                Ok(files) if files.is_empty() => {}
+                Ok(files) => {
+                    let mut imported = Vec::new();
+                    let mut failures = Vec::new();
+                    for (name, content) in &files {
+                        match postman::import(&mut self.tree, content) {
+                            Ok(summary) => imported.push(summary),
+                            Err(e) => failures.push(format!("{name}: {e}")),
+                        }
+                    }
+                    if let Some(last) = imported.last() {
+                        let id = last.collection;
+                        self.select_only(id);
+                        self.persist();
+                    }
+                    self.notice = Some(import_notice(&imported, &failures));
+                }
+            },
+            Message::ExportDone(result) => match result {
+                Ok(Some(name)) => {
+                    self.notice = Some(Notice {
+                        text: format!("Exported to {name}."),
+                        error: false,
+                    });
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    self.notice = Some(Notice {
+                        text: format!("Export failed: {e}"),
+                        error: true,
+                    });
+                }
+            },
+            Message::DismissNotice => self.notice = None,
             Message::ConfirmDelete => {
                 if let Some(ids) = self.confirm_delete.take() {
                     for id in ids {
@@ -1148,5 +1228,98 @@ fn collapse_all(nodes: &mut [Node]) {
     for node in nodes {
         node.expanded = false;
         collapse_all(&mut node.children);
+    }
+}
+
+// ───────────────────────────── import / export helpers ─────────────────────────────
+
+/// Lets the user pick one or more Postman collection files and reads them.
+async fn pick_collections() -> Result<Vec<(String, String)>, String> {
+    let Some(files) = rfd::AsyncFileDialog::new()
+        .set_title("Import Postman collection")
+        .add_filter("Postman collection", &["json"])
+        .pick_files()
+        .await
+    else {
+        return Ok(Vec::new());
+    };
+
+    let mut out = Vec::new();
+    for file in files {
+        let bytes = file.read().await;
+        let name = file.file_name();
+        let text =
+            String::from_utf8(bytes).map_err(|_| format!("{name} is not a UTF-8 text file."))?;
+        out.push((name, text.trim_start_matches('\u{feff}').to_string()));
+    }
+    Ok(out)
+}
+
+/// Asks where to save the collection and writes it there.
+async fn save_collection(file_name: String, json: String) -> Result<Option<String>, String> {
+    let Some(file) = rfd::AsyncFileDialog::new()
+        .set_title("Export collection")
+        .set_file_name(file_name)
+        .add_filter("Postman collection", &["json"])
+        .save_file()
+        .await
+    else {
+        return Ok(None);
+    };
+
+    file.write(json.as_bytes())
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(Some(file.file_name()))
+}
+
+/// A collection name that is safe to use as a file name on every platform.
+fn safe_file_name(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| {
+            if c.is_control() || "<>:\"/\\|?*".contains(c) {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let cleaned = cleaned.trim().trim_end_matches('.').trim();
+    if cleaned.is_empty() {
+        "collection".to_string()
+    } else {
+        cleaned.to_string()
+    }
+}
+
+fn import_notice(imported: &[postman::Summary], failures: &[String]) -> Notice {
+    let mut lines = Vec::new();
+
+    for summary in imported {
+        lines.push(format!(
+            "Imported \"{}\": {} requests, {} folders.",
+            summary.name, summary.requests, summary.folders
+        ));
+    }
+
+    let mut warnings: Vec<&str> = Vec::new();
+    for summary in imported {
+        for warning in &summary.warnings {
+            if !warnings.contains(&warning.as_str()) {
+                warnings.push(warning);
+            }
+        }
+    }
+    if !warnings.is_empty() {
+        lines.push(format!("Not supported: {}.", warnings.join("; ")));
+    }
+    for failure in failures {
+        lines.push(format!("Could not import {failure}"));
+    }
+
+    Notice {
+        text: lines.join("\n"),
+        error: imported.is_empty(),
     }
 }
