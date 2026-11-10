@@ -375,6 +375,20 @@ fn divider<'a>(which: Divider, vertical: bool) -> Element<'a, Message> {
 /// Width (or height) of the area where a divider can be grabbed.
 const GRAB: f32 = 8.0;
 
+/// Does the node's name (or, for a request, its URL) contain `query` (already lowercase)?
+fn node_matches(node: &Node, query: &str) -> bool {
+    node.name.to_lowercase().contains(query)
+        || node
+            .request()
+            .is_some_and(|r| r.url.to_lowercase().contains(query))
+}
+
+fn has_match_inside(node: &Node, query: &str) -> bool {
+    node.children
+        .iter()
+        .any(|c| node_matches(c, query) || has_match_inside(c, query))
+}
+
 fn centered<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
     container(content).center(Fill).into()
 }
@@ -447,13 +461,40 @@ impl Oxide {
         .align_y(iced::Center)
         .padding(Padding::from([8, 12]));
 
+        let query = self.search.trim().to_lowercase();
+        let search_box = {
+            let input = text_input("Search requests…", &self.search)
+                .style(input_style)
+                .id(SEARCH_ID)
+                .on_input(Message::SearchChanged)
+                .size(13)
+                .padding(Padding::from([6, 10]));
+            let mut line = row![input].spacing(4).align_y(iced::Center);
+            if !self.search.is_empty() {
+                line = line.push(
+                    button(text("×").size(15))
+                        .padding(Padding::from([0, 6]))
+                        .style(icon_button_style)
+                        .on_press(Message::SearchChanged(String::new())),
+                );
+            }
+            container(line).padding(Padding::from([0, 10]).bottom(8.0))
+        };
+
         let mut items: Vec<Element<'_, Message>> = Vec::new();
-        self.push_rows(&mut items, &self.tree.roots, 0);
+        if query.is_empty() {
+            self.push_rows(&mut items, &self.tree.roots, 0);
+        } else {
+            self.push_matches(&mut items, &self.tree.roots, 0, &query, false);
+        }
+        let searching_without_results = !query.is_empty() && items.is_empty();
         let rows = Column::with_children(items)
             .spacing(1)
             .padding(Padding::from([0, 6]));
 
-        let list: Element<'_, Message> = if self.tree.roots.is_empty() {
+        let list: Element<'_, Message> = if searching_without_results {
+            centered(text("No matching requests.").size(13).style(muted))
+        } else if self.tree.roots.is_empty() {
             centered(
                 text("No collections yet.\nClick + to create one.")
                     .size(13)
@@ -466,6 +507,7 @@ impl Oxide {
 
         let mut sidebar = column![
             header,
+            search_box,
             mouse_area(list).on_right_press(Message::SidebarContext)
         ];
         if let Some(error) = &self.save_error {
@@ -644,6 +686,28 @@ impl Oxide {
         .height(Fill)
         .style(sidebar_style)
         .into()
+    }
+
+    /// The rows left by the search: matching nodes plus the folders/collections leading to them.
+    /// A container whose own name matches is shown with everything inside it.
+    fn push_matches<'a>(
+        &'a self,
+        out: &mut Vec<Element<'a, Message>>,
+        nodes: &'a [Node],
+        depth: usize,
+        query: &str,
+        parent_matched: bool,
+    ) {
+        for node in nodes {
+            let own = node_matches(node, query);
+            if !(parent_matched || own || has_match_inside(node, query)) {
+                continue;
+            }
+            out.push(self.node_row(node, depth));
+            if node.is_container() {
+                self.push_matches(out, &node.children, depth + 1, query, parent_matched || own);
+            }
+        }
     }
 
     fn push_rows<'a>(
@@ -1073,6 +1137,7 @@ impl Oxide {
                 hint("Ctrl+Shift+N", "New folder"),
                 hint("Ctrl+S", "Save request"),
                 hint("Ctrl+B", "Show / hide sidebar"),
+                hint("Ctrl+F", "Search requests"),
                 hint("Ctrl+D", "Duplicate"),
                 hint("F2", "Rename"),
                 hint("Del", "Delete"),

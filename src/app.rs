@@ -14,6 +14,7 @@ use crate::vars;
 
 pub const RENAME_ID: &str = "oxide-rename-input";
 pub const TABS_ID: &str = "oxide-tabs";
+pub const SEARCH_ID: &str = "oxide-search";
 
 // ───────────────────────────── UI enums ─────────────────────────────
 
@@ -124,6 +125,7 @@ pub enum Shortcut {
     FocusNext,
     FocusPrevious,
     ToggleSidebar,
+    FocusSearch,
 }
 
 /// A draggable border between two panels.
@@ -144,6 +146,9 @@ pub struct Drag {
 
 #[derive(Debug, Clone)]
 pub enum Message {
+    // Sidebar search
+    SearchChanged(String),
+
     // Variables
     OpenVariables(VarScope),
     CloseVariables,
@@ -290,6 +295,8 @@ pub struct Oxide {
     pub save_error: Option<String>,
     pub notice: Option<Notice>,
     /// Index into [`theme::ENTRIES`].
+    /// Text typed in the sidebar search box (empty = show everything).
+    pub search: String,
     pub theme_index: usize,
     /// Global variables (shared by all collections).
     pub globals: Vec<KeyValue>,
@@ -334,6 +341,7 @@ impl Oxide {
             confirm_delete: None,
             save_error,
             notice: None,
+            search: String::new(),
             theme_index: 0,
             globals: storage::load_globals(),
             vars_dialog: None,
@@ -1068,6 +1076,7 @@ impl Oxide {
                 }
                 self.vars_dialog = Some(scope);
             }
+            Message::SearchChanged(text) => self.search = text,
             Message::CloseVariables => self.vars_dialog = None,
             Message::ToggleTheme => self.theme_index = theme::opposite_of(self.theme_index),
             Message::SetTheme(choice) => self.theme_index = choice.0,
@@ -1221,8 +1230,24 @@ impl Oxide {
                 Task::none()
             }
             Shortcut::Escape => {
-                self.extra.clear();
+                if self.search.is_empty() {
+                    self.extra.clear();
+                } else {
+                    self.search.clear();
+                }
                 Task::none()
+            }
+            Shortcut::FocusSearch => {
+                if self.sidebar_visible {
+                    Task::batch([
+                        operation::focus(SEARCH_ID),
+                        operation::select_all(SEARCH_ID),
+                    ])
+                } else {
+                    // Show the sidebar; press Ctrl+F again to focus the box.
+                    self.sidebar_visible = true;
+                    Task::none()
+                }
             }
             Shortcut::Confirm => Task::none(),
             Shortcut::Save => {
@@ -1568,6 +1593,7 @@ fn shortcut_for(
         ('w', false) => Some(Shortcut::CloseTab),
         ('s', false) => Some(Shortcut::Save),
         ('b', false) => Some(Shortcut::ToggleSidebar),
+        ('f', false) => Some(Shortcut::FocusSearch),
         (c @ '1'..='9', false) => Some(Shortcut::GoToTab(c as usize - '1' as usize)),
         _ => None,
     }
