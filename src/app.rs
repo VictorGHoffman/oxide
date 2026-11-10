@@ -125,6 +125,7 @@ pub enum MenuAction {
     ImportCollection,
     ExportCollection,
     EditVariables,
+    ShowInFolder,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -949,6 +950,22 @@ impl Oxide {
                 if let Some(id) = node_target {
                     let root = self.tree.ancestors(id).last().copied().unwrap_or(id);
                     return self.update(Message::OpenVariables(VarScope::Collection(root)));
+                }
+            }
+            MenuAction::ShowInFolder => {
+                let result = match storage::file_path() {
+                    Some(path) if path.exists() => reveal_file(&path),
+                    Some(path) => match path.parent() {
+                        Some(dir) if dir.exists() => open_target(&dir.display().to_string()),
+                        _ => Err("Nothing has been saved yet.".to_string()),
+                    },
+                    None => Err("Could not find the Documents folder.".to_string()),
+                };
+                if let Err(e) = result {
+                    self.notice = Some(Notice {
+                        text: format!("Could not open the folder: {e}"),
+                        error: true,
+                    });
                 }
             }
             MenuAction::ExportCollection => {
@@ -2416,6 +2433,33 @@ fn open_target(target: &str) -> Result<(), String> {
     let mut command = {
         let mut c = Command::new("xdg-open");
         c.arg(target);
+        c
+    };
+
+    command.spawn().map(|_| ()).map_err(|e| e.to_string())
+}
+
+/// Opens the folder that holds `path`, selecting the file where the system supports it.
+fn reveal_file(path: &std::path::Path) -> Result<(), String> {
+    use std::process::Command;
+
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut c = Command::new("explorer");
+        c.arg(format!("/select,{}", path.display()));
+        c
+    };
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut c = Command::new("open");
+        c.arg("-R").arg(path);
+        c
+    };
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut command = {
+        let dir = path.parent().unwrap_or(path);
+        let mut c = Command::new("xdg-open");
+        c.arg(dir);
         c
     };
 
