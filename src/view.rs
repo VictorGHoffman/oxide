@@ -4,7 +4,7 @@ use iced::font::{self, Font};
 use iced::mouse::Interaction;
 use iced::widget::{
     button, checkbox, column, container, mouse_area, opaque, pick_list, radio, row, scrollable,
-    space, stack, text, text_editor, text_input, Column, Row,
+    space, stack, text, text_editor, text_input, tooltip, Column, Row,
 };
 use iced::{color, Border, Color, Element, Fill, Length, Padding, Theme};
 
@@ -63,10 +63,73 @@ fn shortcut_label(keys: &str) -> String {
     keys.replace("Ctrl", modifier)
 }
 
+// ───────────────────────────── shape ─────────────────────────────
+
+/// Corner radii used everywhere, so the whole UI stays consistently round.
+const RADIUS_SM: f32 = 6.0;
+const RADIUS_MD: f32 = 8.0;
+const RADIUS_LG: f32 = 12.0;
+
+fn input_style(theme: &Theme, status: text_input::Status) -> text_input::Style {
+    let mut style = text_input::default(theme, status);
+    style.border.radius = RADIUS_MD.into();
+    style
+}
+
+fn editor_style(theme: &Theme, status: text_editor::Status) -> text_editor::Style {
+    let mut style = text_editor::default(theme, status);
+    style.border.radius = RADIUS_MD.into();
+    style
+}
+
+fn pick_style(theme: &Theme, status: pick_list::Status) -> pick_list::Style {
+    let mut style = pick_list::default(theme, status);
+    style.border.radius = RADIUS_MD.into();
+    style
+}
+
+fn checkbox_style(theme: &Theme, status: checkbox::Status) -> checkbox::Style {
+    let mut style = checkbox::primary(theme, status);
+    style.border.radius = 4.0.into();
+    style
+}
+
+fn primary_button(theme: &Theme, status: button::Status) -> button::Style {
+    let mut style = button::primary(theme, status);
+    style.border.radius = RADIUS_MD.into();
+    style
+}
+
+fn secondary_button(theme: &Theme, status: button::Status) -> button::Style {
+    let mut style = button::secondary(theme, status);
+    style.border.radius = RADIUS_MD.into();
+    style
+}
+
+fn danger_button(theme: &Theme, status: button::Status) -> button::Style {
+    let mut style = button::danger(theme, status);
+    style.border.radius = RADIUS_MD.into();
+    style
+}
+
 // ───────────────────────────── container / button styles ─────────────────────────────
 
+/// A rounded panel floating on the window background.
+fn panel_style(theme: &Theme) -> container::Style {
+    let p = theme.extended_palette();
+    container::Style {
+        background: Some(p.background.weaker.color.into()),
+        border: Border {
+            color: p.background.strong.color.scale_alpha(0.55),
+            width: 1.0,
+            radius: RADIUS_LG.into(),
+        },
+        ..container::Style::default()
+    }
+}
+
 fn sidebar_style(theme: &Theme) -> container::Style {
-    container::Style::default().background(theme.extended_palette().background.weaker.color)
+    panel_style(theme)
 }
 
 fn divider_style(theme: &Theme) -> container::Style {
@@ -86,7 +149,7 @@ fn row_style(selected: bool, hovered: bool) -> impl Fn(&Theme) -> container::Sty
         container::Style {
             background: background.map(Into::into),
             border: Border {
-                radius: 4.0.into(),
+                radius: RADIUS_MD.into(),
                 ..Border::default()
             },
             ..container::Style::default()
@@ -101,7 +164,7 @@ fn card_style(theme: &Theme) -> container::Style {
         border: Border {
             color: p.background.strong.color,
             width: 1.0,
-            radius: 6.0.into(),
+            radius: RADIUS_LG.into(),
         },
         ..container::Style::default()
     }
@@ -131,7 +194,7 @@ fn menu_item_style(danger: bool) -> impl Fn(&Theme, button::Status) -> button::S
                     p.primary.base.text
                 },
                 border: Border {
-                    radius: 4.0.into(),
+                    radius: RADIUS_SM.into(),
                     ..Border::default()
                 },
                 ..button::Style::default()
@@ -167,7 +230,7 @@ fn pill_style(active: bool) -> impl Fn(&Theme, button::Status) -> button::Style 
                 theme.palette().text.scale_alpha(0.65)
             },
             border: Border {
-                radius: 4.0.into(),
+                radius: RADIUS_SM.into(),
                 ..Border::default()
             },
             ..button::Style::default()
@@ -185,7 +248,7 @@ fn icon_button_style(theme: &Theme, status: button::Status) -> button::Style {
             .text
             .scale_alpha(if hovered { 1.0 } else { 0.6 }),
         border: Border {
-            radius: 4.0.into(),
+            radius: RADIUS_SM.into(),
             ..Border::default()
         },
         ..button::Style::default()
@@ -198,79 +261,118 @@ fn tab_style(active: bool) -> impl Fn(&Theme) -> container::Style {
         container::Style {
             background: Some(
                 if active {
-                    p.background.base.color
-                } else {
                     p.background.weaker.color
+                } else {
+                    p.background.base.color
                 }
                 .into(),
             ),
             border: Border {
-                color: p.background.strong.color,
-                width: 0.0,
-                radius: 0.0.into(),
+                color: if active {
+                    theme.palette().primary.scale_alpha(0.7)
+                } else {
+                    p.background.strong.color.scale_alpha(0.45)
+                },
+                width: 1.0,
+                radius: RADIUS_MD.into(),
             },
             ..container::Style::default()
         }
     }
 }
 
-fn accent_bar(active: bool) -> impl Fn(&Theme) -> container::Style {
-    move |theme| {
-        container::Style::default().background(if active {
-            theme.palette().primary
-        } else {
-            Color::TRANSPARENT
-        })
-    }
-}
-
 // ───────────────────────────── small builders ─────────────────────────────
 
-fn hline<'a>() -> Element<'a, Message> {
-    container(space())
-        .width(Fill)
-        .height(1)
-        .style(divider_style)
+/// Which part of a little window-layout icon is filled.
+#[derive(Clone, Copy)]
+enum Pane {
+    Left,
+    Right,
+    Bottom,
+}
+
+/// A small "window with one pane highlighted" icon, drawn with plain containers.
+fn pane_icon<'a>(pane: Pane) -> Element<'a, Message> {
+    let ink = |theme: &Theme| theme.palette().text.scale_alpha(0.8);
+
+    let filled = |width: Length, height: Length| {
+        container(space())
+            .width(width)
+            .height(height)
+            .style(move |theme: &Theme| container::Style {
+                background: Some(ink(theme).into()),
+                border: Border {
+                    radius: 1.5.into(),
+                    ..Border::default()
+                },
+                ..container::Style::default()
+            })
+    };
+
+    let inner: Element<'a, Message> = match pane {
+        Pane::Left => row![filled(Length::Fixed(5.0), Fill), space().width(Fill)]
+            .spacing(2)
+            .into(),
+        Pane::Right => row![space().width(Fill), filled(Length::Fixed(5.0), Fill)]
+            .spacing(2)
+            .into(),
+        Pane::Bottom => column![space().height(Fill), filled(Fill, Length::Fixed(4.0))]
+            .spacing(2)
+            .into(),
+    };
+
+    container(inner)
+        .padding(2)
+        .width(18)
+        .height(14)
+        .style(move |theme: &Theme| container::Style {
+            border: Border {
+                color: ink(theme),
+                width: 1.5,
+                radius: 4.0.into(),
+            },
+            ..container::Style::default()
+        })
         .into()
 }
 
-fn vline<'a>() -> Element<'a, Message> {
-    container(space())
-        .width(1)
-        .height(Fill)
-        .style(divider_style)
-        .into()
+/// An icon button with a tooltip.
+fn icon_button<'a>(pane: Pane, label: &'static str, on_press: Message) -> Element<'a, Message> {
+    tooltip(
+        button(pane_icon(pane))
+            .padding(Padding::from([5, 7]))
+            .style(icon_button_style)
+            .on_press(on_press),
+        container(text(label).size(12))
+            .padding(Padding::from([4, 8]))
+            .style(card_style),
+        tooltip::Position::Bottom,
+    )
+    .gap(4)
+    .into()
 }
 
-/// A draggable border: a 1px line with a wider invisible grab area.
+/// A draggable gap between two panels (the panels' own borders are the visible edge).
 fn divider<'a>(which: Divider, vertical: bool) -> Element<'a, Message> {
-    let (line, cursor): (Element<'a, Message>, _) = if vertical {
+    let (gap, cursor): (Element<'a, Message>, _) = if vertical {
         (
-            container(vline())
-                .width(GRAB)
-                .height(Fill)
-                .align_x(iced::Center)
-                .into(),
+            container(space()).width(GRAB).height(Fill).into(),
             Interaction::ResizingHorizontally,
         )
     } else {
         (
-            container(hline())
-                .width(Fill)
-                .height(GRAB)
-                .align_y(iced::Center)
-                .into(),
+            container(space()).width(Fill).height(GRAB).into(),
             Interaction::ResizingVertically,
         )
     };
-    mouse_area(line)
+    mouse_area(gap)
         .on_press(Message::DragStart(which))
         .interaction(cursor)
         .into()
 }
 
 /// Width (or height) of the area where a divider can be grabbed.
-const GRAB: f32 = 6.0;
+const GRAB: f32 = 8.0;
 
 fn centered<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
     container(content).center(Fill).into()
@@ -298,8 +400,14 @@ impl Oxide {
             ]
             .into()
         } else {
-            row![self.collapsed_sidebar(), vline(), self.main_area()].into()
+            row![
+                self.collapsed_sidebar(),
+                space().width(GRAB),
+                self.main_area()
+            ]
+            .into()
         };
+        let body = container(body).padding(8).width(Fill).height(Fill);
 
         let mut layers = stack![body];
         if let Some(menu) = &self.menu {
@@ -319,10 +427,7 @@ impl Oxide {
         let header = row![
             text("COLLECTIONS").size(11).font(BOLD).style(muted),
             space().width(Fill),
-            button(text("«").size(14))
-                .padding(Padding::from([0, 6]))
-                .style(icon_button_style)
-                .on_press(Message::ToggleSidebar),
+            icon_button(Pane::Left, "Hide sidebar (Ctrl+B)", Message::ToggleSidebar),
             button(text("Import").size(11))
                 .padding(Padding::from([2, 8]))
                 .style(icon_button_style)
@@ -404,14 +509,13 @@ impl Oxide {
 
     /// The thin strip left when the sidebar is hidden, with a button to bring it back.
     fn collapsed_sidebar(&self) -> Element<'_, Message> {
-        container(
-            button(text("»").size(14))
-                .padding(Padding::from([2, 6]))
-                .style(icon_button_style)
-                .on_press(Message::ToggleSidebar),
-        )
-        .padding(Padding::from([8, 4]))
-        .width(32)
+        container(icon_button(
+            Pane::Left,
+            "Show sidebar (Ctrl+B)",
+            Message::ToggleSidebar,
+        ))
+        .padding(Padding::from([10, 4]))
+        .width(34)
         .height(Fill)
         .style(sidebar_style)
         .into()
@@ -452,6 +556,7 @@ impl Oxide {
 
         let label: Element<'a, Message> = match self.renaming.as_ref().filter(|r| r.id == id) {
             Some(r) => text_input("Name", &r.text)
+                .style(input_style)
                 .id(RENAME_ID)
                 .size(13)
                 .padding(2)
@@ -704,11 +809,11 @@ impl Oxide {
                     space().width(Fill),
                     button(text("Cancel").size(13).center())
                         .padding(Padding::from([7, 18]))
-                        .style(button::secondary)
+                        .style(secondary_button)
                         .on_press(Message::CancelDelete),
                     button(text("Delete").size(13).center().color(Color::WHITE))
                         .padding(Padding::from([7, 18]))
-                        .style(button::danger)
+                        .style(danger_button)
                         .on_press(Message::ConfirmDelete),
                 ]
                 .spacing(8),
@@ -750,19 +855,18 @@ impl Oxide {
             .padding(12),
         )
         .width(Fill)
-        .height(Fill);
+        .height(Fill)
+        .style(panel_style);
 
-        let toggle_label = if self.response_right {
-            "Dock bottom"
+        // The icon shows where the response will go when clicked.
+        let (pane, label) = if self.response_right {
+            (Pane::Bottom, "Dock response at the bottom")
         } else {
-            "Dock right"
+            (Pane::Right, "Dock response on the right")
         };
         let response_bar = row![
             space().width(Fill),
-            button(text(toggle_label).size(12))
-                .padding(Padding::from([2, 8]))
-                .style(icon_button_style)
-                .on_press(Message::ToggleResponseLayout),
+            icon_button(pane, label, Message::ToggleResponseLayout),
         ]
         .padding(Padding::from([4, 12]));
         let response = column![
@@ -771,12 +875,18 @@ impl Oxide {
                 .padding(Padding::from([0, 12]).bottom(12.0))
                 .height(Fill),
         ];
+        let response = |width: Length, height: Length| {
+            container(response)
+                .width(width)
+                .height(height)
+                .style(panel_style)
+        };
 
         let content: Element<'_, Message> = if self.response_right {
             let sidebar = if self.sidebar_visible {
                 self.sidebar_width
             } else {
-                32.0
+                34.0
             };
             let width = self.response_width.clamp(
                 MIN_RESPONSE_WIDTH,
@@ -785,7 +895,7 @@ impl Oxide {
             row![
                 editor,
                 divider(Divider::Response, true),
-                container(response).width(width).height(Fill),
+                response(Length::Fixed(width), Fill),
             ]
             .height(Fill)
             .into()
@@ -797,13 +907,14 @@ impl Oxide {
             column![
                 editor,
                 divider(Divider::Response, false),
-                container(response).height(height).width(Fill),
+                response(Fill, Length::Fixed(height)),
             ]
             .height(Fill)
             .into()
         };
 
-        container(column![self.tab_bar(), hline(), content])
+        column![self.tab_bar(), content]
+            .spacing(8)
             .width(Fill)
             .height(Fill)
             .into()
@@ -823,7 +934,7 @@ impl Oxide {
             .into()
         };
 
-        centered(
+        container(centered(
             column![
                 text("Oxide").size(48).font(BOLD).color(color!(0xe0652f)),
                 text("Select a request on the left, or create one to get started.")
@@ -844,7 +955,11 @@ impl Oxide {
             ]
             .spacing(6)
             .align_x(iced::Center),
-        )
+        ))
+        .width(Fill)
+        .height(Fill)
+        .style(panel_style)
+        .into()
     }
 
     // ───────────────────────── tabs ─────────────────────────
@@ -880,16 +995,10 @@ impl Oxide {
             .align_y(iced::Center)
             .padding(Padding::from([5, 8]));
 
-            let tab_view = column![
-                container(space())
-                    .width(Fill)
-                    .height(2)
-                    .style(accent_bar(active)),
-                container(content)
-                    .width(190)
-                    .clip(true)
-                    .style(tab_style(active)),
-            ];
+            let tab_view = container(content)
+                .width(190)
+                .clip(true)
+                .style(tab_style(active));
 
             Some(
                 mouse_area(tab_view)
@@ -902,7 +1011,7 @@ impl Oxide {
         });
 
         mouse_area(
-            scrollable(Row::with_children(tabs).spacing(1))
+            scrollable(Row::with_children(tabs).spacing(6))
                 .id(TABS_ID)
                 .direction(scrollable::Direction::Horizontal(
                     scrollable::Scrollbar::new().width(3).scroller_width(3),
@@ -918,30 +1027,50 @@ impl Oxide {
     fn url_bar<'a>(&'a self, req: &'a Request, rt: &'a Runtime) -> Element<'a, Message> {
         let sending = matches!(rt.state, ResponseState::Sending);
 
+        // The dropdown is tinted with the method's colour, like in the sidebar.
+        let tint = method_color(req.method);
         let methods = pick_list(Method::ALL, Some(req.method), |m| {
             Message::Edit(Edit::Method(m))
         })
-        .width(120)
-        .padding(8);
+        .width(125)
+        .padding(Padding::from([8, 12]))
+        .font(BOLD)
+        .style(move |theme: &Theme, status| {
+            let mut style = pick_style(theme, status);
+            style.text_color = tint;
+            style.handle_color = tint;
+            style.background = tint.scale_alpha(0.12).into();
+            style.border.color = tint.scale_alpha(0.55);
+            style
+        })
+        .menu_style(|theme: &Theme| {
+            let mut style = iced::overlay::menu::default(theme);
+            style.border.radius = RADIUS_MD.into();
+            style
+        });
 
         let url = text_input("Enter URL, e.g. https://httpbin.org/get", &req.url)
+            .style(input_style)
             .on_input(|s| Message::Edit(Edit::Url(s)))
             .on_submit(Message::Send)
             .padding(8);
 
         let action = if sending {
             button(text("Cancel").center())
-                .style(button::danger)
+                .style(danger_button)
                 .on_press(Message::Cancel)
         } else {
             button(text("Send").center().color(Color::WHITE).font(SEMIBOLD))
-                .style(button::primary)
+                .style(primary_button)
                 .on_press(Message::Send)
         }
         .width(90)
         .padding(8);
 
-        row![methods, url, action].spacing(8).into()
+        row![methods, url, action]
+            .spacing(8)
+            .align_y(iced::Center)
+            .into()
     }
 
     fn section_bar<'a>(&'a self, req: &'a Request, rt: &'a Runtime) -> Element<'a, Message> {
@@ -1038,6 +1167,7 @@ impl Oxide {
                     _ => "Plain text body",
                 };
                 text_editor(&rt.body_editor)
+                    .style(editor_style)
                     .placeholder(placeholder)
                     .on_action(|a| Message::Edit(Edit::BodyAction(a)))
                     .font(Font::MONOSPACE)
@@ -1058,7 +1188,8 @@ impl Oxide {
                 Message::Edit(Edit::AuthKind(k))
             })
             .width(200)
-            .padding(6),
+            .padding(6)
+            .style(pick_style),
         );
 
         let fields: Element<'a, Message> = match req.auth_kind {
@@ -1069,6 +1200,7 @@ impl Oxide {
             AuthKind::Bearer => labeled(
                 "Token",
                 text_input("Token", &req.bearer_token)
+                    .style(input_style)
                     .on_input(|s| Message::Edit(Edit::BearerToken(s)))
                     .padding(6),
             ),
@@ -1076,12 +1208,14 @@ impl Oxide {
                 labeled(
                     "Username",
                     text_input("Username", &req.basic_user)
+                        .style(input_style)
                         .on_input(|s| Message::Edit(Edit::BasicUser(s)))
                         .padding(6),
                 ),
                 labeled(
                     "Password",
                     text_input("Password", &req.basic_password)
+                        .style(input_style)
                         .on_input(|s| Message::Edit(Edit::BasicPassword(s)))
                         .secure(true)
                         .padding(6),
@@ -1093,12 +1227,14 @@ impl Oxide {
                 labeled(
                     "Key",
                     text_input("Key", &req.api_key_name)
+                        .style(input_style)
                         .on_input(|s| Message::Edit(Edit::ApiKeyName(s)))
                         .padding(6),
                 ),
                 labeled(
                     "Value",
                     text_input("Value", &req.api_key_value)
+                        .style(input_style)
                         .on_input(|s| Message::Edit(Edit::ApiKeyValue(s)))
                         .padding(6),
                 ),
@@ -1108,7 +1244,8 @@ impl Oxide {
                         Message::Edit(Edit::ApiKeyIn(l))
                     })
                     .width(200)
-                    .padding(6),
+                    .padding(6)
+                    .style(pick_style),
                 ),
             ]
             .spacing(8)
@@ -1232,6 +1369,7 @@ impl Oxide {
                     centered(text("This response has no body").size(13).style(muted))
                 } else {
                     text_editor(&rt.response_editor)
+                        .style(editor_style)
                         .on_action(Message::ResponseAction)
                         .font(Font::MONOSPACE)
                         .size(13)
@@ -1361,6 +1499,7 @@ fn kv_table<'a>(
             space().width(18).into()
         } else {
             checkbox(kv.enabled)
+                .style(checkbox_style)
                 .on_toggle(move |on| Message::Edit(Edit::KvToggle(list, i, on)))
                 .into()
         };
@@ -1379,10 +1518,12 @@ fn kv_table<'a>(
         row![
             toggle,
             text_input(key_placeholder, &kv.key)
+                .style(input_style)
                 .on_input(move |s| Message::Edit(Edit::KvKey(list, i, s)))
                 .size(13)
                 .padding(6),
             text_input(value_placeholder, &kv.value)
+                .style(input_style)
                 .on_input(move |s| Message::Edit(Edit::KvValue(list, i, s)))
                 .size(13)
                 .padding(6),
