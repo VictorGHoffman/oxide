@@ -1,5 +1,5 @@
 [package]
-name = "oxide"
+name = "Oxide"
 version = "0.1.0"
 edition = "2021"
 description = "Oxide - a lightweight HTTP client"
