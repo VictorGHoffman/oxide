@@ -713,11 +713,16 @@ impl Oxide {
             )
         });
 
-        scrollable(Row::with_children(tabs).spacing(1))
-            .direction(scrollable::Direction::Horizontal(
-                scrollable::Scrollbar::new().width(3).scroller_width(3),
-            ))
-            .into()
+        mouse_area(
+            scrollable(Row::with_children(tabs).spacing(1))
+                .id(TABS_ID)
+                .direction(scrollable::Direction::Horizontal(
+                    scrollable::Scrollbar::new().width(3).scroller_width(3),
+                ))
+                .width(Fill),
+        )
+        .on_scroll(Message::TabsScrolled)
+        .into()
     }
 
     // ───────────────────────── request editor ─────────────────────────

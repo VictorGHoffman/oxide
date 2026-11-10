@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use iced::widget::{operation, text_editor};
+use iced::widget::{operation, scrollable, text_editor};
 use iced::{event, keyboard, mouse, window, Event, Point, Size, Subscription, Task, Theme};
 
 use crate::http;
@@ -10,6 +10,7 @@ use crate::model::*;
 use crate::storage;
 
 pub const RENAME_ID: &str = "oxide-rename-input";
+pub const TABS_ID: &str = "oxide-tabs";
 
 // ───────────────────────────── UI enums ─────────────────────────────
 
@@ -124,6 +125,7 @@ pub enum Message {
     PinTab(Id),
     CloseTab(Id),
     TabContext(Id),
+    TabsScrolled(mouse::ScrollDelta),
 
     // Delete confirmation
     ConfirmDelete,
@@ -634,6 +636,20 @@ impl Oxide {
                 self.commit_rename();
                 self.menu = None;
                 self.activate(id);
+            }
+            Message::TabsScrolled(delta) => {
+                // The horizontal scrollable ignores the vertical wheel axis, so
+                // translate it: wheel down/up scrolls the tabs right/left.
+                let (x, y) = match delta {
+                    mouse::ScrollDelta::Lines { x, y } => (x * 60.0, y * 60.0),
+                    mouse::ScrollDelta::Pixels { x, y } => (x, y),
+                };
+                if x == 0.0 && y != 0.0 {
+                    return operation::scroll_by(
+                        TABS_ID,
+                        scrollable::AbsoluteOffset { x: -y, y: 0.0 },
+                    );
+                }
             }
             Message::PinTab(id) => self.pin(id),
             Message::CloseTab(id) => self.close_tab(id),

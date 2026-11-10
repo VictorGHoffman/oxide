@@ -31,6 +31,10 @@ Collections live in `<Documents>/Oxide/collections.json`.
 - Edits *inside* a request (URL, params, body, auth, ...) are only written when you press **Ctrl+S**. A dot next to the request name (sidebar and tab) means it has unsaved changes.
 - Deleting always asks for confirmation (Enter confirms, Esc cancels).
 
+## Icon
+
+`assets/oxide.ico` is compiled into the binary (window icon, via `include_bytes!`) and, on Windows, embedded into the `.exe` by `build.rs`. Replace the file with your own icon (include a 256x256 entry).
+
 ## Layout
 
 - `src/model.rs`  collection tree + request definition (unit-tested)
