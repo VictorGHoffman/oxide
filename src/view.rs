@@ -55,6 +55,12 @@ fn status_color(code: u16) -> Color {
     }
 }
 
+fn accent_text(theme: &Theme) -> iced::widget::text::Style {
+    iced::widget::text::Style {
+        color: Some(theme.extended_palette().primary.base.color),
+    }
+}
+
 fn muted(theme: &Theme) -> text::Style {
     text::Style {
         color: Some(theme.palette().text.scale_alpha(0.55)),
@@ -77,8 +83,81 @@ const RADIUS_SM: f32 = 6.0;
 const RADIUS_MD: f32 = 8.0;
 const RADIUS_LG: f32 = 12.0;
 
+/// Resting, hovered and focused looks shared by the inputs: nearly part of the
+/// background until the mouse is over them.
+fn field_look(theme: &Theme, state: FieldState) -> (Background, Color) {
+    let p = theme.extended_palette();
+    match state {
+        FieldState::Rest => (
+            p.background.weak.color.scale_alpha(0.55).into(),
+            p.background.strong.color.scale_alpha(0.5),
+        ),
+        FieldState::Hover => (p.background.weak.color.into(), p.background.strong.color),
+        FieldState::Focus => (p.background.base.color.into(), p.primary.base.color),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum InputLook {
+    Blend,
+    Url,
+    Classic,
+}
+
+#[derive(Clone, Copy)]
+enum FieldState {
+    Rest,
+    Hover,
+    Focus,
+}
+
+/// Plain fields blend into the background until the mouse is over them or they have focus.
 fn input_style(theme: &Theme, status: text_input::Status) -> text_input::Style {
     let mut style = text_input::default(theme, status);
+    style.border.radius = RADIUS_MD.into();
+    match status {
+        text_input::Status::Active | text_input::Status::Disabled => {
+            style.background = Background::Color(Color::TRANSPARENT);
+            style.border.color = Color::TRANSPARENT;
+        }
+        text_input::Status::Hovered => {
+            let (background, border) = field_look(theme, FieldState::Hover);
+            style.background = background;
+            style.border.color = border;
+        }
+        text_input::Status::Focused { .. } => {
+            let (background, border) = field_look(theme, FieldState::Focus);
+            style.background = background;
+            style.border.color = border;
+        }
+    }
+    style
+}
+
+/// The default look (auth fields, like the body and script editors).
+fn classic_input_style(theme: &Theme, status: text_input::Status) -> text_input::Style {
+    let mut style = text_input::default(theme, status);
+    style.border.radius = RADIUS_MD.into();
+    style
+}
+
+/// The URL field: a little more present than the rest, and brighter under the mouse.
+fn url_style(theme: &Theme, status: text_input::Status) -> text_input::Style {
+    let mut style = text_input::default(theme, status);
+    let p = theme.extended_palette();
+    let (background, border) = match status {
+        text_input::Status::Active | text_input::Status::Disabled => (
+            p.background.weak.color.into(),
+            p.background.strong.color.scale_alpha(0.85),
+        ),
+        text_input::Status::Hovered => (
+            p.background.weak.color.into(),
+            p.background.strong.color,
+        ),
+        text_input::Status::Focused { .. } => field_look(theme, FieldState::Focus),
+    };
+    style.background = background;
+    style.border.color = border;
     style.border.radius = RADIUS_MD.into();
     style
 }
@@ -89,8 +168,22 @@ fn editor_style(theme: &Theme, status: text_editor::Status) -> text_editor::Styl
     style
 }
 
+fn classic_pick_style(theme: &Theme, status: pick_list::Status) -> pick_list::Style {
+    let mut style = pick_list::default(theme, status);
+    style.border.radius = RADIUS_MD.into();
+    style
+}
+
 fn pick_style(theme: &Theme, status: pick_list::Status) -> pick_list::Style {
     let mut style = pick_list::default(theme, status);
+    let state = match status {
+        pick_list::Status::Active => FieldState::Rest,
+        pick_list::Status::Hovered => FieldState::Hover,
+        pick_list::Status::Opened { .. } => FieldState::Focus,
+    };
+    let (background, border) = field_look(theme, state);
+    style.background = background;
+    style.border.color = border;
     style.border.radius = RADIUS_MD.into();
     style
 }
@@ -506,6 +599,10 @@ mod ic {
     pub const EXPAND: char = '\u{e211}';
     pub const SUN: char = '\u{e178}';
     pub const MOON: char = '\u{e11e}';
+    pub const FOLDER: char = '\u{e0d7}';
+    pub const LIBRARY: char = '\u{e100}';
+    pub const CHEVRON_RIGHT: char = '\u{e06f}';
+    pub const CHEVRON_DOWN: char = '\u{e06d}';
     pub const EXTERNAL: char = '\u{e0b9}';
 }
 
@@ -928,11 +1025,23 @@ impl Oxide {
                 })
                 .into()
             }
-            _ => text(if node.expanded { "▾" } else { "▸" })
-                .size(12)
+            kind => {
+                let chevron = glyph(
+                    if node.expanded { ic::CHEVRON_DOWN } else { ic::CHEVRON_RIGHT },
+                    13.0,
+                )
                 .width(14)
-                .style(muted)
-                .into(),
+                .style(muted);
+                let icon = match kind {
+                    Kind::Collection => glyph(ic::LIBRARY, 14.0).style(accent_text),
+                    _ => glyph(
+                        if node.expanded { ic::FOLDER_OPEN } else { ic::FOLDER },
+                        14.0,
+                    )
+                    .style(muted),
+                };
+                row![chevron, icon.width(16)].spacing(4).align_y(iced::Center).into()
+            }
         };
 
         let label: Element<'a, Message> = match self.renaming.as_ref().filter(|r| r.id == id) {
@@ -1338,8 +1447,14 @@ impl Oxide {
         let editor = container(
             column![
                 self.url_bar(req, rt),
-                self.section_bar(req, rt),
-                container(self.section_content(req, rt)).height(Length::FillPortion(1)),
+                column![
+                    self.section_bar(req, rt),
+                    container(space()).width(Fill).height(1).style(divider_style),
+                ]
+                .spacing(8),
+                container(self.section_content(req, rt))
+                    .width(Fill)
+                    .height(Length::FillPortion(1)),
             ]
             .spacing(10)
             .padding(12),
@@ -1806,6 +1921,40 @@ impl Oxide {
         on_input: impl Fn(String) -> Message + 'a,
         on_submit: Option<Message>,
     ) -> Element<'a, Message> {
+        let look = if on_submit.is_some() {
+            InputLook::Url
+        } else {
+            InputLook::Blend
+        };
+        self.var_input_with(look, placeholder, value, size, padding, width, on_input, on_submit)
+    }
+
+    /// Same as [`Self::var_input`] but with the default field look (auth tab).
+    fn var_input_classic<'a>(
+        &'a self,
+        placeholder: &str,
+        value: &str,
+        size: f32,
+        padding: f32,
+        width: f32,
+        on_input: impl Fn(String) -> Message + 'a,
+        on_submit: Option<Message>,
+    ) -> Element<'a, Message> {
+        self.var_input_with(InputLook::Classic, placeholder, value, size, padding, width, on_input, on_submit)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn var_input_with<'a>(
+        &'a self,
+        look: InputLook,
+        placeholder: &str,
+        value: &str,
+        size: f32,
+        padding: f32,
+        width: f32,
+        on_input: impl Fn(String) -> Message + 'a,
+        on_submit: Option<Message>,
+    ) -> Element<'a, Message> {
         let mut input = text_input(placeholder, value)
             .on_input(on_input)
             .size(size)
@@ -1865,9 +2014,15 @@ impl Oxide {
             .padding(padding)
             .width(Fill)
             .style(move |theme: &Theme| {
-                let base = text_input::default(theme, text_input::Status::Active);
+                let base = match look {
+                    InputLook::Url => url_style(theme, text_input::Status::Active).background,
+                    InputLook::Classic => {
+                        classic_input_style(theme, text_input::Status::Active).background
+                    }
+                    InputLook::Blend => Background::Color(Color::TRANSPARENT),
+                };
                 container::Style {
-                    background: coloured.then_some(base.background),
+                    background: coloured.then_some(base),
                     border: Border {
                         radius: RADIUS_MD.into(),
                         ..Border::default()
@@ -1877,7 +2032,11 @@ impl Oxide {
             });
 
         let input = input.style(move |theme: &Theme, status| {
-            let mut style = input_style(theme, status);
+            let mut style = match look {
+                InputLook::Url => url_style(theme, status),
+                InputLook::Classic => classic_input_style(theme, status),
+                InputLook::Blend => input_style(theme, status),
+            };
             if coloured {
                 style.background = Background::Color(Color::TRANSPARENT);
                 style.value = Color::TRANSPARENT;
@@ -2484,7 +2643,7 @@ impl Oxide {
             })
             .width(200)
             .padding(6)
-            .style(pick_style),
+            .style(classic_pick_style),
         );
 
         let fields: Element<'a, Message> = match req.auth_kind {
@@ -2494,7 +2653,7 @@ impl Oxide {
                 .into(),
             AuthKind::Bearer => labeled(
                 "Token",
-                self.var_input(
+                self.var_input_classic(
                     "Token",
                     &req.bearer_token,
                     16.0,
@@ -2507,7 +2666,7 @@ impl Oxide {
             AuthKind::Basic => column![
                 labeled(
                     "Username",
-                    self.var_input(
+                    self.var_input_classic(
                         "Username",
                         &req.basic_user,
                         16.0,
@@ -2520,7 +2679,7 @@ impl Oxide {
                 labeled(
                     "Password",
                     text_input("Password", &req.basic_password)
-                        .style(input_style)
+                        .style(classic_input_style)
                         .on_input(|s| Message::Edit(Edit::BasicPassword(s)))
                         .secure(true)
                         .padding(6),
@@ -2532,7 +2691,7 @@ impl Oxide {
             AuthKind::ApiKey => column![
                 labeled(
                     "Key",
-                    self.var_input(
+                    self.var_input_classic(
                         "Key",
                         &req.api_key_name,
                         16.0,
@@ -2544,7 +2703,7 @@ impl Oxide {
                 ),
                 labeled(
                     "Value",
-                    self.var_input(
+                    self.var_input_classic(
                         "Value",
                         &req.api_key_value,
                         16.0,
@@ -2561,7 +2720,7 @@ impl Oxide {
                     })
                     .width(200)
                     .padding(6)
-                    .style(pick_style),
+                    .style(classic_pick_style),
                 ),
             ]
             .spacing(8)
@@ -2583,7 +2742,7 @@ impl Oxide {
         let field = |label: &'static str, value: &'a str, edit: fn(String) -> Edit| {
             labeled(
                 label,
-                self.var_input(label, value, 16.0, 6.0, width, move |s| Message::Edit(edit(s)), None),
+                self.var_input_classic(label, value, 16.0, 6.0, width, move |s| Message::Edit(edit(s)), None),
             )
         };
 
@@ -2594,14 +2753,14 @@ impl Oxide {
             })
             .width(200)
             .padding(6)
-            .style(pick_style),
+            .style(classic_pick_style),
         ));
         form = form.push(field("Access Token URL", &req.oauth_token_url, Edit::OAuthTokenUrl));
         form = form.push(field("Client ID", &req.oauth_client_id, Edit::OAuthClientId));
         form = form.push(labeled(
             "Client Secret",
             text_input("Client Secret", &req.oauth_client_secret)
-                .style(input_style)
+                .style(classic_input_style)
                 .on_input(|s| Message::Edit(Edit::OAuthClientSecret(s)))
                 .secure(true)
                 .padding(6),
@@ -2611,7 +2770,7 @@ impl Oxide {
             form = form.push(labeled(
                 "Password",
                 text_input("Password", &req.oauth_password)
-                    .style(input_style)
+                    .style(classic_input_style)
                     .on_input(|s| Message::Edit(Edit::OAuthPassword(s)))
                     .secure(true)
                     .padding(6),
@@ -2625,7 +2784,7 @@ impl Oxide {
             })
             .width(200)
             .padding(6)
-            .style(pick_style),
+            .style(classic_pick_style),
         ));
 
         // The token that is currently saved for this request.
@@ -3369,13 +3528,19 @@ fn kv_table<'a>(
         };
 
         row![toggle, key_input, value_input, remove]
-        .spacing(8)
-        .align_y(iced::Center)
-        .into()
+            .spacing(8)
+            .align_y(iced::Center)
     });
 
+    // A thin line between the header and each row.
+    let line = || container(space()).width(Fill).height(1).style(divider_style);
+    let mut table = Column::new().spacing(6).push(header);
+    for row in body {
+        table = table.push(line()).push(row);
+    }
+
     scrollable(
-        column![header, Column::with_children(body).spacing(4)]
+        table
             .spacing(6)
             .padding(Padding::from([2, 4]).right(10)),
     )
