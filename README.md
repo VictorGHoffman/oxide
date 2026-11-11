@@ -41,6 +41,7 @@ Use it to build, send and inspect HTTP requests, organise them into collections,
 ### Responses
 - Pretty (formatted and highlighted), Raw, collapsible **JSON tree** (with Expand all and Collapse all) and an **HTML preview** that renders headings, paragraphs, lists, tables and links.
 - Open an HTML response in your default browser.
+- **Image preview** (PNG, JPEG, GIF, WebP, BMP) and **PDF preview** with page navigation. Zoom in and out, fit an image to the panel, open the file in your default program or save it to disk.
 - Status, time and size at a glance, plus response headers and cookies.
 - Copy the response body.
 

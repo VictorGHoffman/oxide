@@ -6,6 +6,7 @@ mod highlight;
 mod htmlview;
 mod http;
 mod jsontree;
+mod media;
 mod model;
 mod oauth;
 mod postman;

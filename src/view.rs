@@ -2583,7 +2583,7 @@ impl Oxide {
             if rt.json.is_some() {
                 tools = tools.push(view_button("Tree", BodyView::Tree));
             }
-            if rt.html.is_some() {
+            if rt.html.is_some() || rt.preview.is_some() {
                 tools = tools.push(view_button("Preview", BodyView::Preview));
             }
             tools = tools
@@ -2605,6 +2605,12 @@ impl Oxide {
                     centered(text("This response has no body").size(13).style(muted))
                 } else if rt.body_view == BodyView::Tree && rt.json.is_some() {
                     self.json_tree(rt)
+                } else if rt.body_view == BodyView::Preview && rt.preview.is_some() {
+                    let bar: Element<'a, Message> = match &rt.preview {
+                        Some(Ok(preview)) => media_tools(preview),
+                        _ => space().into(),
+                    };
+                    column![bar, self.media_preview(rt)].spacing(6).into()
                 } else if rt.body_view == BodyView::Preview && rt.html.is_some() {
                     self.html_preview(rt)
                 } else {
@@ -2699,7 +2705,123 @@ impl Oxide {
     }
 }
 
+/// Zoom / page controls and the open / save buttons of an image or PDF preview.
+fn media_tools<'a>(preview: &'a crate::media::Preview) -> Element<'a, Message> {
+    use crate::media::Preview;
+
+    let small = |label: &'a str, message: Message| {
+        button(text(label).size(12))
+            .padding(Padding::from([3, 8]))
+            .style(pill_style(false))
+            .on_press(message)
+    };
+    let mut tools = Row::new().spacing(4).align_y(iced::Center);
+
+    let percent = |zoom: f32| format!("{:.0}%", zoom * 100.0);
+    match preview {
+        Preview::Image { zoom, .. } => {
+            tools = tools
+                .push(small("Fit", Message::MediaFit))
+                .push(small("−", Message::MediaZoom(false)))
+                .push(
+                    text(zoom.map(percent).unwrap_or_else(|| "auto".into()))
+                        .size(12)
+                        .width(Length::Fixed(40.0))
+                        .center()
+                        .style(muted),
+                )
+                .push(small("+", Message::MediaZoom(true)))
+                .push(small("100%", Message::MediaActual));
+        }
+        Preview::Pdf(doc) => {
+            let nav = |label: &'a str, message: Message, enabled: bool| {
+                button(text(label).size(12))
+                    .padding(Padding::from([3, 8]))
+                    .style(pill_style(false))
+                    .on_press_maybe(enabled.then_some(message))
+            };
+            tools = tools
+                .push(nav("«", Message::PdfPage(PdfNav::First), doc.page > 0))
+                .push(nav("‹", Message::PdfPage(PdfNav::Previous), doc.page > 0))
+                .push(
+                    text(format!("Page {} of {}", doc.page + 1, doc.pages))
+                        .size(12)
+                        .style(muted),
+                )
+                .push(nav("›", Message::PdfPage(PdfNav::Next), doc.page + 1 < doc.pages))
+                .push(nav("»", Message::PdfPage(PdfNav::Last), doc.page + 1 < doc.pages))
+                .push(space().width(6))
+                .push(small("−", Message::MediaZoom(false)))
+                .push(
+                    text(percent(doc.zoom))
+                        .size(12)
+                        .width(Length::Fixed(40.0))
+                        .center()
+                        .style(muted),
+                )
+                .push(small("+", Message::MediaZoom(true)))
+                .push(small("100%", Message::MediaActual));
+        }
+    }
+    tools
+        .push(space().width(6))
+        .push(small("Open", Message::OpenMedia))
+        .push(small("Save…", Message::SaveMedia))
+        .into()
+}
+
 impl Oxide {
+    /// An image or a PDF page.
+    fn media_preview<'a>(&'a self, rt: &'a Runtime) -> Element<'a, Message> {
+        use crate::media::Preview;
+
+        let both = || scrollable::Direction::Both {
+            vertical: scrollable::Scrollbar::default(),
+            horizontal: scrollable::Scrollbar::default(),
+        };
+
+        match &rt.preview {
+            Some(Err(e)) => centered(text(e.clone()).size(13).color(color!(0xe5534b))),
+            Some(Ok(Preview::Image { picture, zoom })) => match zoom {
+                None => container(
+                    iced::widget::image(picture.handle.clone())
+                        .content_fit(iced::ContentFit::ScaleDown),
+                )
+                .padding(8)
+                .center(Fill)
+                .into(),
+                Some(zoom) => scrollable(
+                    container(
+                        iced::widget::image(picture.handle.clone())
+                            .width(Length::Fixed(picture.width as f32 * zoom))
+                            .height(Length::Fixed(picture.height as f32 * zoom)),
+                    )
+                    .padding(8),
+                )
+                .direction(both())
+                .width(Fill)
+                .height(Fill)
+                .into(),
+            },
+            Some(Ok(Preview::Pdf(doc))) => match &doc.handle {
+                Some(handle) => scrollable(
+                    container(
+                        iced::widget::image(handle.clone())
+                            .width(Length::Fixed(doc.size.0 as f32))
+                            .height(Length::Fixed(doc.size.1 as f32)),
+                    )
+                    .padding(12),
+                )
+                .direction(both())
+                .width(Fill)
+                .height(Fill)
+                .into(),
+                None => centered(text("Could not draw this page.").size(13).style(muted)),
+            },
+            None => space().into(),
+        }
+    }
+
     /// The response as a collapsible JSON tree.
     fn json_tree<'a>(&'a self, rt: &'a Runtime) -> Element<'a, Message> {
         let Some(json) = &rt.json else {

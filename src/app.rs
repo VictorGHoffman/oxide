@@ -10,6 +10,7 @@ use crate::certs::{self, CertKind, ClientCert};
 use crate::htmlview;
 use crate::http;
 use crate::jsontree;
+use crate::media;
 use crate::model::*;
 use crate::oauth;
 use crate::postman;
@@ -187,6 +188,14 @@ pub enum CertFile {
     Ca,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum PdfNav {
+    First,
+    Previous,
+    Next,
+    Last,
+}
+
 #[derive(Debug, Clone)]
 pub enum CertField {
     Enabled(bool),
@@ -284,6 +293,17 @@ pub enum Message {
     JsonCollapseAll,
     OpenLink(String),
     OpenInBrowser,
+    /// Zoom an image / PDF preview: `true` = in, `false` = out.
+    MediaZoom(bool),
+    /// Image preview: shrink to fit the panel.
+    MediaFit,
+    /// Image / PDF preview: real size.
+    MediaActual,
+    PdfPage(PdfNav),
+    /// Open the image or PDF with the system's default program.
+    OpenMedia,
+    SaveMedia,
+    MediaSaved(Result<Option<String>, String>),
     ResponseAction(text_editor::Action),
     CopyBody,
 }
@@ -358,6 +378,8 @@ pub struct Runtime {
     pub json_open: HashSet<String>,
     /// The response parsed as an HTML page (for the preview), when it is one.
     pub html: Option<Vec<htmlview::Block>>,
+    /// The response as an image or PDF (for the preview), when it is one.
+    pub preview: Option<Result<media::Preview, String>>,
 }
 
 impl Runtime {
@@ -381,6 +403,7 @@ impl Runtime {
             json: None,
             json_open: HashSet::new(),
             html: None,
+            preview: None,
         }
     }
 }
@@ -1506,6 +1529,10 @@ impl Oxide {
                                     .map(jsontree::default_open)
                                     .unwrap_or_default();
                                 rt.html = is_html(&resp).then(|| htmlview::parse(&resp.body_raw));
+                                rt.preview = resp.media.as_ref().map(media::Preview::open);
+                                if rt.preview.is_some() {
+                                    rt.body_view = BodyView::Preview;
+                                }
                                 rt.state = ResponseState::Done(Box::new(resp));
                                 succeeded = true;
                             }
@@ -1638,6 +1665,92 @@ impl Oxide {
                     }
                 }
             }
+            Message::MediaZoom(up) => {
+                if let Some(Ok(preview)) = self.active_preview() {
+                    match preview {
+                        media::Preview::Image { zoom, .. } => {
+                            *zoom = Some(media::step_zoom(zoom.unwrap_or(1.0), up));
+                        }
+                        media::Preview::Pdf(doc) => {
+                            doc.set_zoom(media::step_zoom(doc.zoom, up));
+                        }
+                    }
+                }
+            }
+            Message::MediaFit => {
+                if let Some(Ok(media::Preview::Image { zoom, .. })) = self.active_preview() {
+                    *zoom = None;
+                }
+            }
+            Message::MediaActual => {
+                if let Some(Ok(preview)) = self.active_preview() {
+                    match preview {
+                        media::Preview::Image { zoom, .. } => *zoom = Some(1.0),
+                        media::Preview::Pdf(doc) => doc.set_zoom(1.0),
+                    }
+                }
+            }
+            Message::PdfPage(nav) => {
+                if let Some(Ok(media::Preview::Pdf(doc))) = self.active_preview() {
+                    let page = match nav {
+                        PdfNav::First => 0,
+                        PdfNav::Previous => doc.page.saturating_sub(1),
+                        PdfNav::Next => doc.page + 1,
+                        PdfNav::Last => doc.pages - 1,
+                    };
+                    doc.go_to(page);
+                }
+            }
+            Message::OpenMedia => {
+                let media = self
+                    .active
+                    .and_then(|id| self.runtime.get(&id))
+                    .and_then(|rt| match &rt.state {
+                        ResponseState::Done(resp) => resp.media.clone(),
+                        _ => None,
+                    });
+                if let Some(media) = media {
+                    let path = std::env::temp_dir()
+                        .join(format!("oxide-preview.{}", media::extension(&media.bytes)));
+                    let result = std::fs::write(&path, media.bytes.as_slice())
+                        .map_err(|e| e.to_string())
+                        .and_then(|_| open_target(&path.display().to_string()));
+                    if let Err(e) = result {
+                        self.notice = Some(Notice {
+                            text: format!("Could not open the file: {e}"),
+                            error: true,
+                        });
+                    }
+                }
+            }
+            Message::SaveMedia => {
+                let media = self
+                    .active
+                    .and_then(|id| self.runtime.get(&id))
+                    .and_then(|rt| match &rt.state {
+                        ResponseState::Done(resp) => resp.media.clone().map(|m| (m, resp.final_url.clone())),
+                        _ => None,
+                    });
+                if let Some((media, url)) = media {
+                    let name = suggested_file_name(&url, media::extension(&media.bytes));
+                    return Task::perform(save_media(name, media.bytes), Message::MediaSaved);
+                }
+            }
+            Message::MediaSaved(result) => match result {
+                Ok(Some(name)) => {
+                    self.notice = Some(Notice {
+                        text: format!("Saved to {name}."),
+                        error: false,
+                    });
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    self.notice = Some(Notice {
+                        text: format!("Could not save the file: {e}"),
+                        error: true,
+                    });
+                }
+            },
             Message::ResponseAction(action) => {
                 // Read-only: allow selecting/copying/scrolling, ignore edits.
                 if !action.is_edit() {
@@ -1825,6 +1938,12 @@ impl Oxide {
             VarScope::Global => Some(&self.globals),
             VarScope::Collection(id) => self.tree.get(id).map(|n| &n.variables),
         }
+    }
+
+    /// The image / PDF preview of the active request, when it has one.
+    fn active_preview(&mut self) -> Option<&mut Result<media::Preview, String>> {
+        let id = self.active?;
+        self.runtime.get_mut(&id)?.preview.as_mut()
     }
 
     /// Saves the certificates and makes them the ones used for the next requests.
@@ -2571,6 +2690,39 @@ fn reveal_file(path: &std::path::Path) -> Result<(), String> {
     };
 
     command.spawn().map(|_| ()).map_err(|e| e.to_string())
+}
+
+/// The last part of a URL's path, or `response.<ext>`.
+fn suggested_file_name(url: &str, extension: &str) -> String {
+    let name = reqwest::Url::parse(url)
+        .ok()
+        .and_then(|u| {
+            u.path_segments()
+                .and_then(|mut s| s.next_back().map(str::to_string))
+        })
+        .filter(|n| !n.is_empty() && n.len() < 100);
+    match name {
+        Some(n) if n.rsplit_once('.').is_some_and(|(_, e)| e.len() <= 5) => n,
+        Some(n) => format!("{n}.{extension}"),
+        None => format!("response.{extension}"),
+    }
+}
+
+/// Asks where to save a downloaded image / PDF and writes it there.
+async fn save_media(
+    name: String,
+    bytes: std::sync::Arc<Vec<u8>>,
+) -> Result<Option<String>, String> {
+    let Some(file) = rfd::AsyncFileDialog::new()
+        .set_title("Save file")
+        .set_file_name(name)
+        .save_file()
+        .await
+    else {
+        return Ok(None);
+    };
+    file.write(&bytes).await.map_err(|e| e.to_string())?;
+    Ok(Some(file.file_name()))
 }
 
 /// Lets the user pick one of the files of a certificate.

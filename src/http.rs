@@ -28,6 +28,8 @@ pub struct Response {
     pub body_raw: String,
     pub body_pretty: String,
     pub is_binary: bool,
+    /// An image or PDF body, kept as bytes for the preview.
+    pub media: Option<crate::media::Media>,
 }
 
 impl Response {
@@ -241,6 +243,11 @@ pub async fn send(req: Request) -> Result<Response, String> {
             .unwrap_or_else(|| body_raw.clone())
     };
 
+    let media = crate::media::sniff(&bytes).map(|kind| crate::media::Media {
+        kind,
+        bytes: std::sync::Arc::new(bytes.to_vec()),
+    });
+
     Ok(Response {
         status: status.as_u16(),
         status_text: status.canonical_reason().unwrap_or("").to_string(),
@@ -254,6 +261,7 @@ pub async fn send(req: Request) -> Result<Response, String> {
         body_raw,
         body_pretty,
         is_binary,
+        media,
     })
 }
 
