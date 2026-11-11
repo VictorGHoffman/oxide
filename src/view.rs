@@ -354,6 +354,17 @@ fn tab_indents(
             }
         }
 
+        // Ctrl+Enter sends the request instead of adding a line.
+        if focused
+            && key_press.modifiers.command()
+            && matches!(
+                key_press.key.as_ref(),
+                iced::keyboard::Key::Named(iced::keyboard::key::Named::Enter)
+            )
+        {
+            return Some(text_editor::Binding::Custom(Message::Send));
+        }
+
         if is_tab && focused {
             let edit = if key_press.modifiers.shift() {
                 unindent.clone()
@@ -577,6 +588,9 @@ impl Oxide {
         }
         if self.backup_open {
             layers = layers.push(self.backup_dialog());
+        }
+        if let Some(palette) = &self.palette {
+            layers = layers.push(self.palette_overlay(palette));
         }
         if let Some(ids) = &self.confirm_delete {
             if let Some(dialog) = self.delete_dialog(ids) {
@@ -1126,7 +1140,7 @@ impl Oxide {
                 Separator,
                 Item(
                     "Import Collection…",
-                    None,
+                    Some("Ctrl+O"),
                     MenuAction::ImportCollection,
                     true,
                     false,
@@ -1159,7 +1173,7 @@ impl Oxide {
                 ),
                 Item(
                     "Import Collection…",
-                    None,
+                    Some("Ctrl+O"),
                     MenuAction::ImportCollection,
                     true,
                     false,
@@ -1448,6 +1462,9 @@ impl Oxide {
                 hint("Ctrl+Click", "Add to selection"),
                 hint("Ctrl+N", "New request"),
                 hint("Ctrl+Shift+N", "New folder"),
+                hint("Ctrl+Enter", "Send request"),
+                hint("Ctrl+K / F1", "Command palette"),
+                hint("Ctrl+O", "Import collection"),
                 hint("Ctrl+S", "Save request"),
                 hint("Ctrl+Z / Ctrl+Y", "Undo / redo"),
                 hint("Ctrl+B", "Show / hide sidebar"),
@@ -2102,6 +2119,84 @@ impl Oxide {
         );
 
         Some(stack![dim, container(opaque(card)).center(Fill)].into())
+    }
+
+    /// Ctrl+K: type to find a command or jump to a request.
+    fn palette_overlay<'a>(&'a self, palette: &'a Palette) -> Element<'a, Message> {
+        let items = self.palette_items();
+        let selected = palette.selected.min(items.len().saturating_sub(1));
+        let start = (selected + 1).saturating_sub(PALETTE_ROWS);
+
+        let input = text_input("Type a command or a request name…", &palette.query)
+            .id(PALETTE_ID)
+            .style(input_style)
+            .on_input(Message::PaletteQuery)
+            .on_submit(Message::PaletteRun)
+            .size(14)
+            .padding(Padding::from([9, 12]));
+
+        let mut list = Column::new().spacing(1);
+        for (index, item) in items.iter().enumerate().skip(start).take(PALETTE_ROWS) {
+            let is_selected = index == selected;
+            let right: Element<'_, Message> = match item.keys {
+                Some(keys) => text(shortcut_label(keys)).size(11).style(muted).into(),
+                None => text(item.detail.clone()).size(11).style(muted).into(),
+            };
+            let line = row![
+                text(item.label.clone()).size(13).width(Fill),
+                right,
+            ]
+            .spacing(16)
+            .align_y(iced::Center);
+
+            list = list.push(
+                button(line)
+                    .width(Fill)
+                    .padding(Padding::from([6, 10]))
+                    .style(move |theme: &Theme, status| {
+                        let p = theme.extended_palette();
+                        let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+                        button::Style {
+                            background: (is_selected || hovered)
+                                .then(|| Background::Color(p.background.strong.color)),
+                            text_color: p.background.base.text,
+                            border: Border {
+                                radius: RADIUS_SM.into(),
+                                ..Border::default()
+                            },
+                            ..button::Style::default()
+                        }
+                    })
+                    .on_press(Message::PaletteRunAt(index)),
+            );
+        }
+        if items.is_empty() {
+            list = list.push(
+                container(text("Nothing matches.").size(13).style(muted)).padding(Padding::from([8, 10])),
+            );
+        }
+
+        let card = container(column![input, list].spacing(8))
+            .padding(10)
+            .width(560)
+            .style(card_style);
+
+        let dim = opaque(
+            mouse_area(container(space()).width(Fill).height(Fill).style(|_| {
+                container::Style::default().background(Color::from_rgba(0.0, 0.0, 0.0, 0.45))
+            }))
+            .on_press(Message::ClosePalette)
+            .on_right_press(Message::ClosePalette),
+        );
+
+        stack![
+            dim,
+            container(opaque(card))
+                .width(Fill)
+                .align_x(iced::alignment::Horizontal::Center)
+                .padding(Padding::default().top(70)),
+        ]
+        .into()
     }
 
     /// Export everything to one file, or bring it back.

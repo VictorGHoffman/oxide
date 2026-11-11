@@ -30,6 +30,9 @@ const HISTORY_MERGE: Duration = Duration::from_millis(700);
 
 pub const TAB_STRIDE: f32 = 196.0;
 pub const SEARCH_ID: &str = "oxide-search";
+pub const PALETTE_ID: &str = "oxide-palette";
+/// Rows shown at once in the command palette.
+pub const PALETTE_ROWS: usize = 10;
 
 // ───────────────────────────── UI enums ─────────────────────────────
 
@@ -164,6 +167,11 @@ pub enum Shortcut {
     FocusSearch,
     Undo,
     Redo,
+    Send,
+    ImportCollection,
+    Palette,
+    Up,
+    Down,
 }
 
 /// A draggable border between two panels.
@@ -218,6 +226,13 @@ pub enum Message {
     // Variables
     OpenVariables(VarScope),
     CloseVariables,
+
+    // Command palette
+    OpenPalette,
+    ClosePalette,
+    PaletteQuery(String),
+    PaletteRun,
+    PaletteRunAt(usize),
 
     // Backup
     OpenBackup,
@@ -366,6 +381,27 @@ pub enum ResponseState {
     Done(Box<http::Response>),
 }
 
+/// The command palette (Ctrl+K).
+pub struct Palette {
+    pub query: String,
+    pub selected: usize,
+}
+
+#[derive(Debug, Clone)]
+pub enum PaletteAction {
+    Run(Message),
+    Open(Id),
+}
+
+#[derive(Debug, Clone)]
+pub struct PaletteItem {
+    pub label: String,
+    /// Where a request lives, or what a command does.
+    pub detail: String,
+    pub keys: Option<&'static str>,
+    pub action: PaletteAction,
+}
+
 /// Per-request UI state that is not part of the saved request definition.
 pub struct Runtime {
     pub section: Section,
@@ -466,6 +502,7 @@ pub struct Oxide {
     pub cert_status: Vec<Result<(), String>>,
     pub certs_open: bool,
     pub backup_open: bool,
+    pub palette: Option<Palette>,
     pub sidebar_visible: bool,
     pub sidebar_width: f32,
     /// `true` = response docked on the right, `false` = below the editor.
@@ -524,6 +561,7 @@ impl Oxide {
             cert_status,
             certs_open: false,
             backup_open: false,
+            palette: None,
             sidebar_visible: true,
             sidebar_width: 280.0,
             response_right: false,
@@ -1403,6 +1441,29 @@ impl Oxide {
             }
             Message::SearchChanged(text) => self.search = text,
             Message::CloseVariables => self.vars_dialog = None,
+            Message::OpenPalette => {
+                self.menu = None;
+                self.commit_rename();
+                self.palette = Some(Palette {
+                    query: String::new(),
+                    selected: 0,
+                });
+                return operation::focus(PALETTE_ID);
+            }
+            Message::ClosePalette => self.palette = None,
+            Message::PaletteQuery(query) => {
+                if let Some(palette) = &mut self.palette {
+                    palette.query = query;
+                    palette.selected = 0;
+                }
+            }
+            Message::PaletteRun => {
+                let index = self.palette.as_ref().map(|p| p.selected);
+                if let Some(index) = index {
+                    return self.run_palette(index);
+                }
+            }
+            Message::PaletteRunAt(index) => return self.run_palette(index),
             Message::OpenBackup => {
                 self.menu = None;
                 self.commit_rename();
@@ -1878,6 +1939,32 @@ impl Oxide {
             return Task::none();
         }
 
+        // The command palette: typing goes to its box, the arrows move the selection.
+        if self.palette.is_some() {
+            let total = self.palette_items().len();
+            match shortcut {
+                Shortcut::Escape | Shortcut::Palette => self.palette = None,
+                Shortcut::Confirm => {
+                    let index = self.palette.as_ref().map(|p| p.selected).unwrap_or(0);
+                    return self.run_palette(index);
+                }
+                Shortcut::Down => {
+                    if let Some(p) = &mut self.palette {
+                        if total > 0 {
+                            p.selected = (p.selected + 1).min(total - 1);
+                        }
+                    }
+                }
+                Shortcut::Up => {
+                    if let Some(p) = &mut self.palette {
+                        p.selected = p.selected.saturating_sub(1);
+                    }
+                }
+                _ => {}
+            }
+            return Task::none();
+        }
+
         // The backup dialog too.
         if self.backup_open {
             if matches!(shortcut, Shortcut::Escape) {
@@ -1972,6 +2059,10 @@ impl Oxide {
             }
             Shortcut::FocusNext => operation::focus_next(),
             Shortcut::FocusPrevious => operation::focus_previous(),
+            Shortcut::Send => self.send_active(),
+            Shortcut::ImportCollection => self.perform(MenuAction::ImportCollection, None),
+            Shortcut::Palette => self.update(Message::OpenPalette),
+            Shortcut::Up | Shortcut::Down => Task::none(),
         }
     }
 
@@ -2038,6 +2129,111 @@ impl Oxide {
         match scope {
             VarScope::Global => Some(&self.globals),
             VarScope::Collection(id) => self.tree.get(id).map(|n| &n.variables),
+        }
+    }
+
+    /// Commands and requests that match what was typed in the palette, best first.
+    pub fn palette_items(&self) -> Vec<PaletteItem> {
+        let query = self
+            .palette
+            .as_ref()
+            .map(|p| p.query.to_lowercase())
+            .unwrap_or_default();
+        let words: Vec<&str> = query.split_whitespace().collect();
+
+        let command = |label: &str, detail: &str, keys: Option<&'static str>, message: Message| {
+            PaletteItem {
+                label: label.to_string(),
+                detail: detail.to_string(),
+                keys,
+                action: PaletteAction::Run(message),
+            }
+        };
+        let has_request = self.active.is_some_and(|id| self.tree.request(id).is_some());
+
+        let mut commands = vec![
+            command("New Request", "", Some("Ctrl+N"), Message::MenuAction(MenuAction::NewRequest)),
+            command("New Folder", "", Some("Ctrl+Shift+N"), Message::MenuAction(MenuAction::NewFolder)),
+            command("New Collection", "", None, Message::MenuAction(MenuAction::NewCollection)),
+            command("Import Collection", "Postman v2.1", Some("Ctrl+O"), Message::MenuAction(MenuAction::ImportCollection)),
+            command("Export Collection", "", None, Message::MenuAction(MenuAction::ExportCollection)),
+            command("Backup: export or restore everything", "", None, Message::OpenBackup),
+            command("Global Variables", "", None, Message::OpenVariables(VarScope::Global)),
+            command("Certificates", "", None, Message::OpenCerts),
+            command("Toggle Sidebar", "", Some("Ctrl+B"), Message::ToggleSidebar),
+            command("Toggle Light / Dark Theme", "", None, Message::ToggleTheme),
+            command("Dock Response Right / Bottom", "", None, Message::ToggleResponseLayout),
+            command("Search Requests", "", Some("Ctrl+F"), Message::Shortcut(Shortcut::FocusSearch)),
+        ];
+        if has_request {
+            commands.splice(
+                0..0,
+                [
+                    command("Send Request", "", Some("Ctrl+Enter"), Message::Send),
+                    command("Save Request", "", Some("Ctrl+S"), Message::Shortcut(Shortcut::Save)),
+                    command("Copy as cURL", "", None, Message::CopyCurl),
+                    command("Duplicate", "", Some("Ctrl+D"), Message::MenuAction(MenuAction::Duplicate)),
+                    command("Rename", "", Some("F2"), Message::MenuAction(MenuAction::Rename)),
+                    command("Close Tab", "", Some("Ctrl+W"), Message::MenuAction(MenuAction::CloseTab)),
+                ],
+            );
+        }
+
+        let mut items: Vec<PaletteItem> = commands;
+        for (id, request) in self.tree.requests() {
+            let Some(node) = self.tree.get(id) else {
+                continue;
+            };
+            let mut path: Vec<String> = self
+                .tree
+                .ancestors(id)
+                .iter()
+                .filter_map(|a| self.tree.get(*a).map(|n| n.name.clone()))
+                .collect();
+            path.reverse();
+            items.push(PaletteItem {
+                label: format!("{}  {}", request.method.short(), node.name),
+                detail: path.join(" / "),
+                keys: None,
+                action: PaletteAction::Open(id),
+            });
+        }
+
+        if words.is_empty() {
+            return items;
+        }
+        let mut scored: Vec<(usize, PaletteItem)> = items
+            .into_iter()
+            .filter_map(|item| {
+                let haystack = format!("{} {}", item.label, item.detail).to_lowercase();
+                let label = item.label.to_lowercase();
+                let mut score = 0;
+                for word in &words {
+                    let at = haystack.find(word)?;
+                    // Earlier and in the name rather than the folder path = better.
+                    score += at + if label.contains(word) { 0 } else { 100 };
+                    if label.starts_with(word) || label.split_whitespace().any(|w| w.starts_with(word)) {
+                        score = score.saturating_sub(20);
+                    }
+                }
+                Some((score, item))
+            })
+            .collect();
+        scored.sort_by_key(|(score, _)| *score);
+        scored.into_iter().map(|(_, item)| item).collect()
+    }
+
+    /// Runs the `index`-th row of the palette and closes it.
+    fn run_palette(&mut self, index: usize) -> Task<Message> {
+        let item = self.palette_items().into_iter().nth(index);
+        self.palette = None;
+        match item.map(|i| i.action) {
+            Some(PaletteAction::Run(message)) => self.update(message),
+            Some(PaletteAction::Open(id)) => {
+                self.open_pinned(id);
+                Task::none()
+            }
+            None => Task::none(),
         }
     }
 
@@ -2663,7 +2859,9 @@ fn handle_event(event: Event, status: event::Status, _window: window::Id) -> Opt
             let shortcut = shortcut_for(&key, physical_key, modifiers)?;
             // Widgets that are typing (text inputs, editors) capture their keys,
             // except Escape, which must still be able to cancel a rename.
-            if status == event::Status::Captured && !matches!(shortcut, Shortcut::Escape) {
+            if status == event::Status::Captured
+                && !matches!(shortcut, Shortcut::Escape | Shortcut::Send)
+            {
                 return None;
             }
             Some(Message::Shortcut(shortcut))
@@ -2682,8 +2880,17 @@ fn shortcut_for(
     match key.as_ref() {
         keyboard::Key::Named(Named::Delete) => return Some(Shortcut::Delete),
         keyboard::Key::Named(Named::F2) => return Some(Shortcut::Rename),
+        keyboard::Key::Named(Named::F1) => return Some(Shortcut::Palette),
         keyboard::Key::Named(Named::Escape) => return Some(Shortcut::Escape),
-        keyboard::Key::Named(Named::Enter) => return Some(Shortcut::Confirm),
+        keyboard::Key::Named(Named::Enter) => {
+            return Some(if modifiers.command() {
+                Shortcut::Send
+            } else {
+                Shortcut::Confirm
+            })
+        }
+        keyboard::Key::Named(Named::ArrowUp) => return Some(Shortcut::Up),
+        keyboard::Key::Named(Named::ArrowDown) => return Some(Shortcut::Down),
         keyboard::Key::Named(Named::Tab) => {
             return Some(if modifiers.shift() {
                 Shortcut::FocusPrevious
@@ -2709,6 +2916,8 @@ fn shortcut_for(
         ('z', true) | ('y', false) => Some(Shortcut::Redo),
         ('b', false) => Some(Shortcut::ToggleSidebar),
         ('f', false) => Some(Shortcut::FocusSearch),
+        ('o', false) => Some(Shortcut::ImportCollection),
+        ('k', false) => Some(Shortcut::Palette),
         (c @ '1'..='9', false) => Some(Shortcut::GoToTab(c as usize - '1' as usize)),
         _ => None,
     }
