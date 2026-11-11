@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use iced::widget::{operation, scrollable, text_editor};
 use iced::{event, keyboard, mouse, window, Event, Point, Size, Subscription, Task, Theme};
 
+use crate::certs::{self, CertKind, ClientCert};
 use crate::htmlview;
 use crate::http;
 use crate::jsontree;
@@ -177,6 +178,24 @@ pub struct Drag {
     pub size: f32,
 }
 
+/// The files a certificate entry points to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CertFile {
+    Pfx,
+    Cert,
+    Key,
+    Ca,
+}
+
+#[derive(Debug, Clone)]
+pub enum CertField {
+    Enabled(bool),
+    Host(String),
+    Kind(CertKind),
+    Passphrase(String),
+    Path(CertFile, String),
+}
+
 #[derive(Debug, Clone)]
 pub enum Message {
     TabPressed(Id),
@@ -187,6 +206,15 @@ pub enum Message {
     // Variables
     OpenVariables(VarScope),
     CloseVariables,
+
+    // Certificates
+    OpenCerts,
+    CloseCerts,
+    CertAdd,
+    CertRemove(usize),
+    CertEdit(usize, CertField),
+    CertBrowse(usize, CertFile),
+    CertPicked(usize, CertFile, Option<String>),
 
     // Layout
     ToggleTheme,
@@ -395,6 +423,11 @@ pub struct Oxide {
     pub globals: Vec<KeyValue>,
     /// The Variables dialog, when open.
     pub vars_dialog: Option<VarScope>,
+    /// Client certificates (saved in certificates.json) and whether their dialog is open.
+    pub certs: Vec<ClientCert>,
+    /// Whether each certificate's files could be read (same order as `certs`).
+    pub cert_status: Vec<Result<(), String>>,
+    pub certs_open: bool,
     pub sidebar_visible: bool,
     pub sidebar_width: f32,
     /// `true` = response docked on the right, `false` = below the editor.
@@ -424,6 +457,10 @@ impl Oxide {
         tree.sync_queries();
         let selected = tree.first_collection();
 
+        let certs = storage::load_certs();
+        certs::set_active(&certs);
+        let cert_status = certs.iter().map(ClientCert::check).collect();
+
         let mut app = Self {
             tree,
             selected,
@@ -445,6 +482,9 @@ impl Oxide {
             theme_index: 0,
             globals: storage::load_globals(),
             vars_dialog: None,
+            certs,
+            cert_status,
+            certs_open: false,
             sidebar_visible: true,
             sidebar_width: 280.0,
             response_right: false,
@@ -1319,6 +1359,50 @@ impl Oxide {
             }
             Message::SearchChanged(text) => self.search = text,
             Message::CloseVariables => self.vars_dialog = None,
+            Message::OpenCerts => {
+                self.menu = None;
+                self.commit_rename();
+                self.certs_open = true;
+            }
+            Message::CloseCerts => self.certs_open = false,
+            Message::CertAdd => {
+                self.certs.push(ClientCert::default());
+                self.cert_status.push(Err("Enter the host this certificate is for.".into()));
+                return self.certs_changed();
+            }
+            Message::CertRemove(index) => {
+                if index < self.certs.len() {
+                    self.certs.remove(index);
+                    let _ = self.cert_status.remove(index);
+                    return self.certs_changed();
+                }
+            }
+            Message::CertEdit(index, field) => {
+                if let Some(cert) = self.certs.get_mut(index) {
+                    match field {
+                        CertField::Enabled(on) => cert.enabled = on,
+                        CertField::Host(text) => cert.host = text,
+                        CertField::Kind(kind) => cert.kind = kind,
+                        CertField::Passphrase(text) => cert.passphrase = text,
+                        CertField::Path(CertFile::Pfx, text) => cert.pfx_path = text,
+                        CertField::Path(CertFile::Cert, text) => cert.cert_path = text,
+                        CertField::Path(CertFile::Key, text) => cert.key_path = text,
+                        CertField::Path(CertFile::Ca, text) => cert.ca_path = text,
+                    }
+                    self.cert_status[index] = cert.check();
+                    return self.certs_changed();
+                }
+            }
+            Message::CertBrowse(index, file) => {
+                return Task::perform(pick_cert_file(file), move |path| {
+                    Message::CertPicked(index, file, path)
+                });
+            }
+            Message::CertPicked(index, file, path) => {
+                if let Some(path) = path {
+                    return self.update(Message::CertEdit(index, CertField::Path(file, path)));
+                }
+            }
             Message::ToggleTheme => self.theme_index = theme::opposite_of(self.theme_index),
             Message::SetTheme(choice) => self.theme_index = choice.0,
             Message::ToggleSidebar => self.sidebar_visible = !self.sidebar_visible,
@@ -1588,6 +1672,17 @@ impl Oxide {
             return Task::none();
         }
 
+        // So is the certificates dialog.
+        if self.certs_open {
+            match shortcut {
+                Shortcut::Escape => self.certs_open = false,
+                Shortcut::FocusNext => return operation::focus_next(),
+                Shortcut::FocusPrevious => return operation::focus_previous(),
+                _ => {}
+            }
+            return Task::none();
+        }
+
         // The variables dialog is modal too (typing goes to its fields).
         if self.vars_dialog.is_some() {
             match shortcut {
@@ -1730,6 +1825,18 @@ impl Oxide {
             VarScope::Global => Some(&self.globals),
             VarScope::Collection(id) => self.tree.get(id).map(|n| &n.variables),
         }
+    }
+
+    /// Saves the certificates and makes them the ones used for the next requests.
+    fn certs_changed(&mut self) -> Task<Message> {
+        certs::set_active(&self.certs);
+        if let Err(e) = storage::save_certs(&self.certs) {
+            self.notice = Some(Notice {
+                text: format!("Could not save the certificates: {e}"),
+                error: true,
+            });
+        }
+        Task::none()
     }
 
     /// Applies an edit made in the Variables dialog and saves it right away.
@@ -2464,6 +2571,30 @@ fn reveal_file(path: &std::path::Path) -> Result<(), String> {
     };
 
     command.spawn().map(|_| ()).map_err(|e| e.to_string())
+}
+
+/// Lets the user pick one of the files of a certificate.
+async fn pick_cert_file(file: CertFile) -> Option<String> {
+    let dialog = rfd::AsyncFileDialog::new();
+    let dialog = match file {
+        CertFile::Pfx => dialog
+            .set_title("Choose the PFX / PKCS#12 certificate")
+            .add_filter("Certificate bundle", &["pfx", "p12"]),
+        CertFile::Cert => dialog
+            .set_title("Choose the certificate")
+            .add_filter("Certificate", &["crt", "cer", "pem"]),
+        CertFile::Key => dialog
+            .set_title("Choose the private key")
+            .add_filter("Private key", &["key", "pem"]),
+        CertFile::Ca => dialog
+            .set_title("Choose the CA certificate")
+            .add_filter("Certificate", &["crt", "cer", "pem", "der"]),
+    }
+    .add_filter("All files", &["*"]);
+    dialog
+        .pick_file()
+        .await
+        .map(|file| file.path().display().to_string())
 }
 
 /// Lets the user pick the file sent as a binary body.

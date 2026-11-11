@@ -18,6 +18,12 @@ Use it to build, send and inspect HTTP requests, organise them into collections,
 - Bearer token, Basic auth and API key (as a header or a query parameter).
 - **OAuth 2.0** with the Client Credentials and Password grants. The token is fetched automatically before the request is sent, stored, and renewed when it expires (using the refresh token when the server provides one). Client credentials can be sent as a Basic header or in the body.
 
+### Certificates
+- Add **client certificates** (mutual TLS) from the Certificates button at the bottom of the sidebar. Supports PFX / PKCS#12 (`.pfx`, `.p12`, with passphrase) and PEM (`.crt` + `.key`).
+- Each certificate is tied to a host (`api.example.com`, `*.example.com`, or with a port such as `host:8443`) and is used automatically for matching requests, including OAuth 2.0 token requests.
+- Optionally trust a private certificate authority (CA) for that host, useful for internal servers whose certificate is not from a public authority.
+- Each entry shows right away whether its files could be read, and can be switched off without deleting it.
+
 ### Collections
 - Collections, folders and requests in a sidebar tree.
 - Drag and drop to reorder items or move them between folders, with a drop indicator while dragging.
@@ -45,16 +51,16 @@ Use it to build, send and inspect HTTP requests, organise them into collections,
 
 ## Shortcuts
 
-| Action            | Shortcut        |
-| ----------------- | --------------- |
-| New request       | Ctrl+N          |
-| New folder        | Ctrl+Shift+N    |
-| Save request      | Ctrl+S          |
-| Duplicate         | Ctrl+D          |
-| Rename            | F2              |
-| Delete            | Del             |
-| Go to tab *n*     | Ctrl+1 … Ctrl+9 |
-| Close current tab | Ctrl+W          |
+| Action              | Shortcut        |
+|---------------------|-----------------|
+| New request         | Ctrl+N          |
+| New folder          | Ctrl+Shift+N    |
+| Save request        | Ctrl+S          |
+| Duplicate           | Ctrl+D          |
+| Rename              | F2              |
+| Delete              | Del             |
+| Go to tab *n*       | Ctrl+1 … Ctrl+9 |
+| Close current tab   | Ctrl+W          |
 
 (Cmd instead of Ctrl on macOS.) Right-click items in the sidebar or on tabs for the context menus.
 
@@ -62,14 +68,16 @@ Use it to build, send and inspect HTTP requests, organise them into collections,
 
 Everything is stored locally in `<Documents>/Oxide/`:
 
-| File               | Contents                          |
-| ------------------ | --------------------------------- |
-| `collections.json` | Collections, folders and requests |
-| `globals.json`     | Global variables                  |
-| `session.json`     | Open tabs and window layout       |
-| `tokens.json`      | OAuth 2.0 tokens                  |
+| File               | Contents                                      |
+|--------------------|-----------------------------------------------|
+| `collections.json` | Collections, folders and requests             |
+| `globals.json`     | Global variables                              |
+| `session.json`     | Open tabs and window layout           |
+| `tokens.json`      | OAuth 2.0 tokens                              |
+| `certificates.json`| Certificate entries (paths and passphrases)   |
 
 - Creating, renaming, moving, duplicating and deleting items saves immediately.
 - Edits *inside* a request (URL, params, body, auth, ...) are written when you press **Ctrl+S**. A dot next to the request name (sidebar and tab) means it has unsaved changes.
 - Deleting always asks for confirmation (Enter confirms, Esc cancels).
+- Certificate files are not copied: Oxide keeps the path to each file, so do not move or delete them. Passphrases are saved as plain text in `certificates.json`.
 - To share or back up a collection, use **Export Collection** and send the resulting Postman `.json` file.

@@ -1,6 +1,7 @@
 #![windows_subsystem = "windows"]
 
 mod app;
+mod certs;
 mod highlight;
 mod htmlview;
 mod http;

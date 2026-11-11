@@ -98,11 +98,13 @@ pub async fn fetch(config: &Config, refresh_token: Option<&str>) -> Result<Token
         form.push(("scope", config.scope.clone()));
     }
 
-    let client = reqwest::Client::builder()
+    let mut client = reqwest::Client::builder()
         .user_agent(concat!("Oxide/", env!("CARGO_PKG_VERSION")))
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|e| e.to_string())?;
+        .timeout(Duration::from_secs(30));
+    if let Ok(url) = reqwest::Url::parse(&config.token_url) {
+        client = crate::certs::apply(client, &url)?;
+    }
+    let client = client.build().map_err(|e| e.to_string())?;
 
     let mut builder = client
         .post(&config.token_url)

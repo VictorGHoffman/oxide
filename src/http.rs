@@ -94,11 +94,14 @@ fn header_pair(name: &str, value: &str) -> Result<(HeaderName, HeaderValue), Str
 pub async fn send(req: Request) -> Result<Response, String> {
     let url = build_url(&req)?;
 
-    let client = reqwest::Client::builder()
-        .user_agent(concat!("Oxide/", env!("CARGO_PKG_VERSION")))
-        .timeout(Duration::from_secs(120))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = crate::certs::apply(
+        reqwest::Client::builder()
+            .user_agent(concat!("Oxide/", env!("CARGO_PKG_VERSION")))
+            .timeout(Duration::from_secs(120)),
+        &url,
+    )?
+    .build()
+    .map_err(describe_error)?;
 
     let mut headers = HeaderMap::new();
     for h in enabled(&req.headers) {

@@ -1,6 +1,6 @@
 [package]
-name = "Oxide"
-version = "0.1.0"
+name = "oxide"
+version = "0.2.0"
 edition = "2021"
 description = "Oxide - a lightweight HTTP client"
 
@@ -12,6 +12,8 @@ serde = { version = "1", features = ["derive"] }
 dirs = "6"
 rfd = "0.15"
 image = { version = "0.25", default-features = false, features = ["ico", "png"] }
+p12-keystore = "0.4.1"
+pem = "4.0.0"
 
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"

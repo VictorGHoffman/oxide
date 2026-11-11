@@ -9,6 +9,7 @@ use iced::widget::{
 use iced::{color, Background, Border, Color, Element, Fill, Length, Padding, Theme};
 
 use crate::app::*;
+use crate::certs::CertKind;
 use crate::highlight;
 use crate::htmlview;
 use crate::jsontree;
@@ -571,6 +572,9 @@ impl Oxide {
                 layers = layers.push(dialog);
             }
         }
+        if self.certs_open {
+            layers = layers.push(self.certs_dialog());
+        }
         if let Some(ids) = &self.confirm_delete {
             if let Some(dialog) = self.delete_dialog(ids) {
                 layers = layers.push(dialog);
@@ -809,24 +813,34 @@ impl Oxide {
     /// Theme picker and light/dark switch at the bottom of the sidebar.
     fn theme_bar(&self) -> Element<'_, Message> {
         container(
-            row![
-                button(text("Globals").size(12))
+            column![
+                row![
+                    button(text("Globals").size(12))
+                        .padding(Padding::from([5, 10]))
+                        .style(pill_style(false))
+                        .on_press(Message::OpenVariables(VarScope::Global)),
+                    button(text("Certificates").size(12))
+                        .padding(Padding::from([5, 10]))
+                        .style(pill_style(false))
+                        .on_press(Message::OpenCerts),
+                ]
+                .spacing(6),
+                row![
+                    pick_list(
+                        theme::Choice::all(),
+                        Some(theme::Choice(self.theme_index)),
+                        Message::SetTheme
+                    )
+                    .width(Fill)
                     .padding(Padding::from([5, 10]))
-                    .style(pill_style(false))
-                    .on_press(Message::OpenVariables(VarScope::Global)),
-                pick_list(
-                    theme::Choice::all(),
-                    Some(theme::Choice(self.theme_index)),
-                    Message::SetTheme
-                )
-                .width(Fill)
-                .padding(Padding::from([5, 10]))
-                .text_size(12)
-                .style(pick_style),
-                self.theme_toggle(),
+                    .text_size(12)
+                    .style(pick_style),
+                    self.theme_toggle(),
+                ]
+                .spacing(6)
+                .align_y(iced::Center),
             ]
-            .spacing(6)
-            .align_y(iced::Center),
+            .spacing(6),
         )
         .padding(Padding::from([8, 10]))
         .width(Fill)
@@ -2064,6 +2078,174 @@ impl Oxide {
         );
 
         Some(stack![dim, container(opaque(card)).center(Fill)].into())
+    }
+
+    /// Client certificates and private authorities, by host.
+    fn certs_dialog(&self) -> Element<'_, Message> {
+        let green = color!(0x4caf7d);
+        let red = color!(0xe5534b);
+
+        let browse = |index: usize, file: CertFile| {
+            button(text("Browse…").size(12))
+                .padding(Padding::from([6, 10]))
+                .style(pill_style(false))
+                .on_press(Message::CertBrowse(index, file))
+        };
+        let path_row = |index: usize, label: &'static str, file: CertFile, value: &str, placeholder: &'static str| {
+            labeled(
+                label,
+                row![
+                    text_input(placeholder, value)
+                        .style(input_style)
+                        .on_input(move |s| Message::CertEdit(index, CertField::Path(file, s)))
+                        .size(13)
+                        .padding(6),
+                    browse(index, file),
+                ]
+                .spacing(6)
+                .align_y(iced::Center),
+            )
+        };
+
+        let mut entries = Column::new().spacing(10);
+        for (index, cert) in self.certs.iter().enumerate() {
+            let mut form = Column::new().spacing(8);
+
+            form = form.push(
+                row![
+                    checkbox(cert.enabled)
+                        .on_toggle(move |on| Message::CertEdit(index, CertField::Enabled(on)))
+                        .style(checkbox_style),
+                    text_input("Host, e.g. api.example.com or *.example.com:8443", &cert.host)
+                        .style(input_style)
+                        .on_input(move |s| Message::CertEdit(index, CertField::Host(s)))
+                        .size(13)
+                        .padding(6),
+                    button(text("Remove").size(12))
+                        .padding(Padding::from([6, 10]))
+                        .style(pill_style(false))
+                        .on_press(Message::CertRemove(index)),
+                ]
+                .spacing(8)
+                .align_y(iced::Center),
+            );
+
+            form = form.push(labeled(
+                "Type",
+                pick_list(CertKind::ALL, Some(cert.kind), move |k| {
+                    Message::CertEdit(index, CertField::Kind(k))
+                })
+                .width(200)
+                .padding(6)
+                .style(pick_style),
+            ));
+
+            match cert.kind {
+                CertKind::Pfx => {
+                    form = form.push(path_row(
+                        index,
+                        "PFX file",
+                        CertFile::Pfx,
+                        &cert.pfx_path,
+                        "Path to the .pfx or .p12 file",
+                    ));
+                    form = form.push(labeled(
+                        "Passphrase",
+                        text_input("Passphrase of the file", &cert.passphrase)
+                            .style(input_style)
+                            .on_input(move |s| Message::CertEdit(index, CertField::Passphrase(s)))
+                            .secure(true)
+                            .size(13)
+                            .padding(6),
+                    ));
+                }
+                CertKind::Pem => {
+                    form = form.push(path_row(
+                        index,
+                        "Certificate",
+                        CertFile::Cert,
+                        &cert.cert_path,
+                        "Path to the .crt / .pem file",
+                    ));
+                    form = form.push(path_row(
+                        index,
+                        "Private key",
+                        CertFile::Key,
+                        &cert.key_path,
+                        "Path to the .key file (not password protected)",
+                    ));
+                }
+            }
+            form = form.push(path_row(
+                index,
+                "CA (optional)",
+                CertFile::Ca,
+                &cert.ca_path,
+                "Extra authority to trust for this host",
+            ));
+
+            let status: Element<'_, Message> = match self.cert_status.get(index) {
+                Some(Ok(())) => text("Ready: the files were read successfully.")
+                    .size(12)
+                    .color(green)
+                    .into(),
+                Some(Err(e)) => text(e.clone()).size(12).color(red).into(),
+                None => space().into(),
+            };
+            form = form.push(status);
+
+            entries = entries.push(
+                container(form)
+                    .padding(12)
+                    .width(Fill)
+                    .style(card_style),
+            );
+        }
+        if self.certs.is_empty() {
+            entries = entries.push(
+                text("No certificates yet. Add one to authenticate with a client certificate (mutual TLS) or to trust a private certificate authority.")
+                    .size(13)
+                    .style(muted),
+            );
+        }
+
+        let card = container(
+            column![
+                text("Certificates").size(17).font(BOLD),
+                text("Each entry applies to requests sent to its host. The first enabled entry that matches is used.")
+                    .size(13)
+                    .style(muted),
+                scrollable(container(entries).padding(Padding::default().right(12)))
+                    .height(Length::Fixed(
+                        (self.window_size.height - 220.0).clamp(160.0, 520.0)
+                    )),
+                row![
+                    button(text("Add certificate").size(13).center())
+                        .padding(Padding::from([7, 14]))
+                        .style(pill_style(false))
+                        .on_press(Message::CertAdd),
+                    space().width(Fill),
+                    button(text("Close").size(13).center())
+                        .padding(Padding::from([7, 18]))
+                        .style(primary_button)
+                        .on_press(Message::CloseCerts),
+                ],
+            ]
+            .spacing(10),
+        )
+        .padding(20)
+        .width(640)
+        .style(card_style);
+
+        let dim = opaque(
+            mouse_area(container(space()).width(Fill).height(Fill).style(|_| {
+                container::Style::default().background(Color::from_rgba(0.0, 0.0, 0.0, 0.55))
+            }))
+            .on_press(Message::CloseCerts)
+            .on_right_press(Message::CloseCerts),
+        );
+
+        stack![dim, container(opaque(card)).center(Fill)].into()
     }
 
     fn auth_section<'a>(&'a self, req: &'a Request, rt: &'a Runtime) -> Element<'a, Message> {
