@@ -37,6 +37,7 @@ fn window_icon() -> Option<window::Icon> {
 
 fn main() -> iced::Result {
     iced::application(Oxide::new, Oxide::update, Oxide::view)
+        .font(include_bytes!("../assets/icons.ttf").as_slice())
         .title(Oxide::title)
         .theme(Oxide::theme)
         .subscription(Oxide::subscription)

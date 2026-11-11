@@ -487,6 +487,70 @@ fn pane_icon<'a>(pane: Pane) -> Element<'a, Message> {
         .into()
 }
 
+/// Icon font (Lucide, subset): a few glyphs for the toolbar and settings buttons.
+const ICONS: Font = Font::with_name("lucide");
+
+mod ic {
+    pub const DOWNLOAD: char = '\u{e0b2}';
+    pub const UPLOAD: char = '\u{e19e}';
+    pub const COPY: char = '\u{e09e}';
+    pub const SETTINGS: char = '\u{e154}';
+    pub const IMPORT: char = '\u{e334}';
+    pub const FOLDER_OPEN: char = '\u{e247}';
+    pub const PLUS: char = '\u{e13d}';
+    pub const TRASH: char = '\u{e18e}';
+    pub const TERMINAL: char = '\u{e181}';
+    pub const BRACES: char = '\u{e36a}';
+    pub const GLOBE: char = '\u{e0e8}';
+    pub const COLLAPSE: char = '\u{e228}';
+    pub const EXPAND: char = '\u{e211}';
+    pub const SUN: char = '\u{e178}';
+    pub const MOON: char = '\u{e11e}';
+    pub const EXTERNAL: char = '\u{e0b9}';
+}
+
+fn glyph<'a>(c: char, size: f32) -> iced::widget::Text<'a> {
+    text(c.to_string()).font(ICONS).size(size)
+}
+
+/// A flat icon-only button with a tooltip.
+fn tool_button<'a>(
+    c: char,
+    label: &'static str,
+    on_press: Message,
+    position: tooltip::Position,
+) -> Element<'a, Message> {
+    tooltip(
+        button(container(glyph(c, 15.0)).center_x(16).center_y(16))
+            .padding(Padding::from([5, 7]))
+            .style(icon_button_style)
+            .on_press(on_press),
+        container(text(label).size(12))
+            .padding(Padding::from([4, 8]))
+            .style(card_style),
+        position,
+    )
+    .gap(4)
+    .into()
+}
+
+/// A button with an icon and a text label (used on the settings pages).
+fn action_button<'a>(
+    c: char,
+    label: &'static str,
+    on_press: Message,
+    primary: bool,
+) -> Element<'a, Message> {
+    let b = button(row![glyph(c, 14.0), text(label).size(13)].spacing(8).align_y(iced::Center))
+        .padding(Padding::from([7, 14]))
+        .on_press(on_press);
+    if primary {
+        b.style(primary_button).into()
+    } else {
+        b.style(pill_style(false)).into()
+    }
+}
+
 /// An icon button with a tooltip.
 fn icon_button<'a>(pane: Pane, label: &'static str, on_press: Message) -> Element<'a, Message> {
     tooltip(
@@ -606,10 +670,7 @@ impl Oxide {
         let header = row![
             text("Collections").size(15).font(BOLD),
             space().width(Fill),
-            button(text("Import").size(12))
-                .padding(Padding::from([4, 10]))
-                .style(pill_style(false))
-                .on_press(Message::MenuAction(MenuAction::ImportCollection)),
+            tool_button(ic::IMPORT, "Import collection (Ctrl+O)", Message::MenuAction(MenuAction::ImportCollection), tooltip::Position::Bottom),
             button(container(plus_icon()).center(Fill))
                 .width(28)
                 .height(26)
@@ -746,74 +807,13 @@ impl Oxide {
         } else {
             "Switch to a dark theme"
         };
-
-        let ink = |theme: &Theme| theme.palette().text.scale_alpha(0.8);
-        // A filled circle in the text colour, or in the panel colour (to carve the moon).
-        let disc = |size: f32, carve: bool| {
-            container(space())
-                .width(size)
-                .height(size)
-                .style(move |theme: &Theme| container::Style {
-                    background: Some(
-                        if carve {
-                            theme.extended_palette().background.weaker.color
-                        } else {
-                            ink(theme)
-                        }
-                        .into(),
-                    ),
-                    border: Border {
-                        radius: (size / 2.0).into(),
-                        ..Border::default()
-                    },
-                    ..container::Style::default()
-                })
-        };
-        let ray = |width: f32, height: f32| {
-            container(space())
-                .width(width)
-                .height(height)
-                .style(move |theme: &Theme| container::Style {
-                    background: Some(ink(theme).into()),
-                    border: Border {
-                        radius: 1.0.into(),
-                        ..Border::default()
-                    },
-                    ..container::Style::default()
-                })
-        };
-
-        let icon: Element<'_, Message> = if dark {
-            // Sun: a disc with four rays.
-            column![
-                ray(2.0, 3.0),
-                row![ray(3.0, 2.0), disc(8.0, false), ray(3.0, 2.0)]
-                    .spacing(1)
-                    .align_y(iced::Center),
-                ray(2.0, 3.0),
-            ]
-            .spacing(1)
-            .align_x(iced::Center)
-            .into()
-        } else {
-            // Moon: a disc with a bite taken out of its top-right.
-            stack![
-                disc(15.0, false),
-                container(disc(11.0, true))
-                    .width(15)
-                    .height(15)
-                    .align_x(iced::alignment::Horizontal::Right)
-                    .align_y(iced::alignment::Vertical::Top),
-            ]
-            .width(15)
-            .height(15)
-            .into()
-        };
+        // Shows what you get by clicking: the sun in dark mode, the moon in light mode.
+        let icon = glyph(if dark { ic::SUN } else { ic::MOON }, 16.0);
 
         tooltip(
-            button(container(icon).width(16).height(16).center(16))
+            button(container(icon).center_x(18).center_y(18))
                 .padding(Padding::from([4, 6]))
-                .style(|_theme: &Theme, _status| button::Style::default())
+                .style(icon_button_style)
                 .on_press(Message::ToggleTheme),
             container(text(label).size(12))
                 .padding(Padding::from([4, 8]))
@@ -828,14 +828,8 @@ impl Oxide {
     fn theme_bar(&self) -> Element<'_, Message> {
         container(
             row![
-                button(text("Globals").size(12))
-                    .padding(Padding::from([5, 10]))
-                    .style(pill_style(false))
-                    .on_press(Message::OpenVariables(VarScope::Global)),
-                button(text("Settings").size(12))
-                    .padding(Padding::from([5, 10]))
-                    .style(pill_style(false))
-                    .on_press(Message::OpenSettings(SettingsTab::Appearance)),
+                tool_button(ic::GLOBE, "Global variables", Message::OpenVariables(VarScope::Global), tooltip::Position::Top),
+                tool_button(ic::SETTINGS, "Settings (Ctrl+,)", Message::OpenSettings(SettingsTab::Appearance), tooltip::Position::Top),
                 space().width(Fill),
                 self.theme_toggle(),
             ]
@@ -1647,16 +1641,10 @@ impl Oxide {
             bar = bar
                 .push(space().width(Fill))
                 .push(
-                    button(text("Copy as cURL").size(12))
-                        .padding(Padding::from([4, 10]))
-                        .style(icon_button_style)
-                        .on_press(Message::CopyCurl),
+                    tool_button(ic::TERMINAL, "Copy as cURL", Message::CopyCurl, tooltip::Position::Bottom),
                 )
                 .push(
-                    button(text("Variables").size(12))
-                        .padding(Padding::from([4, 10]))
-                        .style(icon_button_style)
-                        .on_press(Message::OpenVariables(VarScope::Collection(root))),
+                    tool_button(ic::BRACES, "Collection variables", Message::OpenVariables(VarScope::Collection(root)), tooltip::Position::Bottom),
                 );
         }
         bar.into()
@@ -1761,10 +1749,7 @@ impl Oxide {
         );
         if !path.is_empty() {
             buttons = buttons.push(
-                button(text("Remove").size(13))
-                    .padding(Padding::from([6, 14]))
-                    .style(secondary_button)
-                    .on_press(Message::Edit(Edit::BodyFile(String::new()))),
+                tool_button(ic::TRASH, "Remove", Message::Edit(Edit::BodyFile(String::new())), tooltip::Position::Bottom),
             );
         }
 
@@ -2329,10 +2314,7 @@ impl Oxide {
                 text("Saves every collection (with its variables) and the global variables in a single file. Changes you have not saved with Ctrl+S are not included.")
                     .size(12)
                     .style(muted),
-                button(text("Export backup…").size(13).center())
-                    .padding(Padding::from([7, 14]))
-                    .style(primary_button)
-                    .on_press(Message::ExportBackup),
+                action_button(ic::DOWNLOAD, "Export backup…", Message::ExportBackup, true),
             ]
             .spacing(6),
             column![
@@ -2340,10 +2322,7 @@ impl Oxide {
                 text("Adds the collections of a backup next to yours (nothing is deleted or overwritten) and sets its global variables. A global with the same name gets the value from the backup.")
                     .size(12)
                     .style(muted),
-                button(text("Restore backup…").size(13).center())
-                    .padding(Padding::from([7, 14]))
-                    .style(pill_style(false))
-                    .on_press(Message::RestoreBackup),
+                action_button(ic::UPLOAD, "Restore backup…", Message::RestoreBackup, false),
             ]
             .spacing(6),
             column![
@@ -2351,10 +2330,7 @@ impl Oxide {
                 text("Collections, variables, certificates and settings are files in the Oxide folder inside your Documents.")
                     .size(12)
                     .style(muted),
-                button(text("Show in folder").size(13).center())
-                    .padding(Padding::from([7, 14]))
-                    .style(pill_style(false))
-                    .on_press(Message::MenuAction(MenuAction::ShowInFolder)),
+                action_button(ic::FOLDER_OPEN, "Show in folder", Message::MenuAction(MenuAction::ShowInFolder), false),
             ]
             .spacing(6),
             text("Certificates and OAuth 2.0 tokens are not part of a backup: they point to files on this computer and hold secrets.")
@@ -2371,10 +2347,7 @@ impl Oxide {
         let red = color!(0xe5534b);
 
         let browse = |index: usize, file: CertFile| {
-            button(text("Browse…").size(12))
-                .padding(Padding::from([6, 10]))
-                .style(pill_style(false))
-                .on_press(Message::CertBrowse(index, file))
+            tool_button(ic::FOLDER_OPEN, "Browse…", Message::CertBrowse(index, file), tooltip::Position::Bottom)
         };
         let path_row = |index: usize, label: &'static str, file: CertFile, value: &str, placeholder: &'static str| {
             labeled(
@@ -2406,10 +2379,7 @@ impl Oxide {
                         .on_input(move |s| Message::CertEdit(index, CertField::Host(s)))
                         .size(13)
                         .padding(6),
-                    button(text("Remove").size(12))
-                        .padding(Padding::from([6, 10]))
-                        .style(pill_style(false))
-                        .on_press(Message::CertRemove(index)),
+                    tool_button(ic::TRASH, "Remove the file", Message::CertRemove(index), tooltip::Position::Bottom),
                 ]
                 .spacing(8)
                 .align_y(iced::Center),
@@ -2500,10 +2470,7 @@ impl Oxide {
                 .size(13)
                 .style(muted),
             entries,
-            button(text("Add certificate").size(13).center())
-                .padding(Padding::from([7, 14]))
-                .style(pill_style(false))
-                .on_press(Message::CertAdd),
+            action_button(ic::PLUS, "Add certificate", Message::CertAdd, false),
         ]
         .spacing(10)
         .into()
@@ -2817,26 +2784,17 @@ impl Oxide {
             if rt.body_view == BodyView::Tree && rt.json.is_some() {
                 tools = tools
                     .push(
-                        button(text("Expand all").size(12))
-                            .padding(Padding::from([3, 8]))
-                            .style(pill_style(false))
-                            .on_press(Message::JsonExpandAll),
+                        tool_button(ic::EXPAND, "Expand all", Message::JsonExpandAll, tooltip::Position::Bottom),
                     )
                     .push(
-                        button(text("Collapse all").size(12))
-                            .padding(Padding::from([3, 8]))
-                            .style(pill_style(false))
-                            .on_press(Message::JsonCollapseAll),
+                        tool_button(ic::COLLAPSE, "Collapse all", Message::JsonCollapseAll, tooltip::Position::Bottom),
                     )
                     .push(space().width(8));
             }
             if rt.body_view == BodyView::Preview && rt.html.is_some() {
                 tools = tools
                     .push(
-                        button(text("Open in browser").size(12))
-                            .padding(Padding::from([3, 8]))
-                            .style(pill_style(false))
-                            .on_press(Message::OpenInBrowser),
+                        tool_button(ic::EXTERNAL, "Open in your browser", Message::OpenInBrowser, tooltip::Position::Bottom),
                     )
                     .push(space().width(8));
             }
@@ -2850,16 +2808,10 @@ impl Oxide {
             tools = tools
                 .push(view_button("Raw", BodyView::Raw))
                 .push(
-                    button(text("Copy").size(12))
-                        .padding(Padding::from([3, 8]))
-                        .style(pill_style(false))
-                        .on_press(Message::CopyBody),
+                    tool_button(ic::COPY, "Copy the response", Message::CopyBody, tooltip::Position::Bottom),
                 )
                 .push(
-                    button(text("Save…").size(12))
-                        .padding(Padding::from([3, 8]))
-                        .style(pill_style(false))
-                        .on_press(Message::SaveResponse),
+                    tool_button(ic::DOWNLOAD, "Save the response to a file", Message::SaveResponse, tooltip::Position::Bottom),
                 );
             tools.into()
         } else {
