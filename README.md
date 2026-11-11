@@ -19,24 +19,24 @@ Use it to build, send and inspect HTTP requests, organise them into collections,
 - **OAuth 2.0** with the Client Credentials and Password grants. The token is fetched automatically before the request is sent, stored, and renewed when it expires (using the refresh token when the server provides one). Client credentials can be sent as a Basic header or in the body.
 
 ### Certificates
-- Add **client certificates** (mutual TLS) from the Certificates button at the bottom of the sidebar. Supports PFX / PKCS#12 (`.pfx`, `.p12`, with passphrase) and PEM (`.crt` + `.key`).
+- Add **client certificates** (mutual TLS) in **Settings → Certificates**. Supports PFX / PKCS#12 (`.pfx`, `.p12`, with passphrase) and PEM (`.crt` + `.key`).
 - Each certificate is tied to a host (`api.example.com`, `*.example.com`, or with a port such as `host:8443`) and is used automatically for matching requests, including OAuth 2.0 token requests.
 - Optionally trust a private certificate authority (CA) for that host, useful for internal servers whose certificate is not from a public authority.
 - Each entry shows right away whether its files could be read, and can be switched off without deleting it.
 
 ### cURL
-- **Copy as cURL** from the right-click menu of a request or tab, or from the button above the request's tabs. Variables are replaced by their values.
+- **Copy as cURL** from the right-click menu of a request or tab, or from the terminal icon next to the request's tabs. Variables are replaced by their values.
 - **Paste a cURL command into the URL box** and Oxide fills in the whole request: method, URL, query params, headers, cookies, body (JSON, XML, text, form, file) and Bearer or Basic auth. Multi-line commands copied from documentation or browser dev tools work too.
 
 ### Collections
 - Collections, folders and requests in a sidebar tree.
 - Drag and drop to reorder items or move them between folders, with a drop indicator while dragging.
 - Rename, duplicate and delete from the right-click menu or with keyboard shortcuts.
-- Show the data file's folder from the right-click menu.
+- Folders and collections have their own icons in the tree. Show the data file's folder from the right-click menu.
 - Import and export **Postman Collection v2.1**, including binary bodies and OAuth 2.0 settings.
 
 ### Backup
-- **Backup** (bottom of the sidebar) exports every collection, with its variables, and the global variables to a single `.json` file.
+- **Settings → Data & backup** exports every collection, with its variables, and the global variables to a single `.json` file.
 - **Restore** adds the collections of a backup next to the ones you already have and sets its global variables. Nothing is deleted or overwritten, so it is safe to restore on a computer that already has data.
 - Certificates and OAuth 2.0 tokens are not included: they point to files on the computer and hold secrets.
 
@@ -55,22 +55,39 @@ Use it to build, send and inspect HTTP requests, organise them into collections,
 - Copy the response body, or **save it to a file** (text, images, PDFs and any other download; the file name comes from the server or the URL).
 
 ### Interface
-- Dark and light themes.
+- Modern, flat design with a clean URL bar, underlined tabs, icon buttons with tooltips and the Inter typeface.
+- 12 themes, each with a dark or light counterpart, chosen in Settings. The sun / moon button at the bottom of the sidebar (and next to the theme picker) switches between dark and light at any time.
 - Resizable panels. The response panel can be docked at the bottom or on the right.
-- The window layout, divider positions and open tabs are remembered between sessions.
+- The window layout, divider positions, theme and open tabs are remembered between sessions.
+
+### Command palette
+- **Ctrl+K** or **F1** opens a search box with every command (new request, import, export, settings, theme, ...) and all your requests. Type to filter, use the arrow keys and press Enter.
+
+### Settings (Ctrl+,)
+- **Appearance:** theme, light / dark mode, and where the response is shown.
+- **Requests:** timeout (0 = no limit), follow redirects, and verify TLS certificates (turn off only to reach a test server with a self-signed certificate).
+- **Certificates:** client certificates for mutual TLS.
+- **Data & backup:** export or restore everything, and open the data folder.
+- **Shortcuts:** the full list of keyboard shortcuts.
 
 ## Shortcuts
 
-| Action              | Shortcut        |
-|---------------------|-----------------|
-| New request         | Ctrl+N          |
-| New folder          | Ctrl+Shift+N    |
-| Save request        | Ctrl+S          |
-| Duplicate           | Ctrl+D          |
-| Rename              | F2              |
-| Delete              | Del             |
-| Go to tab *n*       | Ctrl+1 … Ctrl+9 |
-| Close current tab   | Ctrl+W          |
+| Action                     | Shortcut        |
+|----------------------------|-----------------|
+| Send request               | Ctrl+Enter      |
+| Command palette            | Ctrl+K or F1    |
+| Settings                   | Ctrl+,          |
+| Import collection          | Ctrl+O          |
+| New request                | Ctrl+N          |
+| New folder                 | Ctrl+Shift+N    |
+| Save request               | Ctrl+S          |
+| Duplicate                  | Ctrl+D          |
+| Rename                     | F2              |
+| Delete                     | Del             |
+| Show / hide the sidebar    | Ctrl+B          |
+| Search requests            | Ctrl+F          |
+| Go to tab *n*              | Ctrl+1 … Ctrl+9 |
+| Close current tab          | Ctrl+W          |
 
 (Cmd instead of Ctrl on macOS.) Right-click items in the sidebar or on tabs for the context menus.
 
@@ -82,7 +99,8 @@ Everything is stored locally in `<Documents>/Oxide/`:
 |--------------------|-----------------------------------------------|
 | `collections.json` | Collections, folders and requests             |
 | `globals.json`     | Global variables                              |
-| `session.json`     | Open tabs and window layout           |
+| `session.json`     | Open tabs, theme and window layout            |
+| `settings.json`    | Timeout, redirects and TLS verification       |
 | `tokens.json`      | OAuth 2.0 tokens                              |
 | `certificates.json`| Certificate entries (paths and passphrases)   |
 
@@ -91,3 +109,9 @@ Everything is stored locally in `<Documents>/Oxide/`:
 - Deleting always asks for confirmation (Enter confirms, Esc cancels).
 - Certificate files are not copied: Oxide keeps the path to each file, so do not move or delete them. Passphrases are saved as plain text in `certificates.json`.
 - To share or back up a collection, use **Export Collection** and send the resulting Postman `.json` file.
+
+## Licenses
+
+Oxide embeds two open-source assets, both free to use and redistribute:
+- **Inter** typeface, SIL Open Font License 1.1 (© The Inter Project Authors).
+- **Lucide** icons, ISC License (© Lucide Contributors).

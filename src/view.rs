@@ -99,6 +99,7 @@ fn field_look(theme: &Theme, state: FieldState) -> (Background, Color) {
 
 #[derive(Clone, Copy)]
 enum InputLook {
+    Bare,
     Blend,
     Url,
     Classic,
@@ -214,48 +215,54 @@ fn danger_button(theme: &Theme, status: button::Status) -> button::Style {
 
 // ───────────────────────────── container / button styles ─────────────────────────────
 
-/// A rounded panel floating on the window background.
-fn panel_style(theme: &Theme) -> container::Style {
+/// Surface of the main work area; the sidebar and the tab strip sit slightly apart from it.
+fn main_bg(theme: &Theme) -> Color {
     let p = theme.extended_palette();
-    container::Style {
-        background: Some(p.background.weaker.color.into()),
-        border: Border {
-            color: p.background.strong.color.scale_alpha(0.55),
-            width: 1.0,
-            radius: RADIUS_LG.into(),
-        },
-        ..container::Style::default()
-    }
+    if p.is_dark { p.background.weaker.color } else { p.background.base.color }
+}
+
+fn side_bg(theme: &Theme) -> Color {
+    let p = theme.extended_palette();
+    if p.is_dark { p.background.base.color } else { p.background.weaker.color }
+}
+
+/// The hairline used between areas.
+fn hairline(theme: &Theme) -> Color {
+    theme.extended_palette().background.strong.color.scale_alpha(0.55)
+}
+
+/// Flat main surface (no frame): areas are separated by hairlines instead of boxes.
+fn panel_style(theme: &Theme) -> container::Style {
+    container::Style::default().background(main_bg(theme))
 }
 
 fn sidebar_style(theme: &Theme) -> container::Style {
-    panel_style(theme)
+    container::Style::default().background(side_bg(theme))
+}
+
+fn strip_style(theme: &Theme) -> container::Style {
+    container::Style::default().background(side_bg(theme))
 }
 
 fn divider_style(theme: &Theme) -> container::Style {
-    container::Style::default().background(theme.extended_palette().background.strong.color)
+    container::Style::default().background(hairline(theme))
 }
 
 fn row_style(selected: bool, hovered: bool) -> impl Fn(&Theme) -> container::Style {
     move |theme| {
         let p = theme.extended_palette();
         let background = if selected {
-            Some(p.primary.base.color.scale_alpha(0.20))
+            Some(p.primary.base.color.scale_alpha(0.16))
         } else if hovered {
-            Some(p.background.weak.color.scale_alpha(0.7))
+            Some(p.background.strong.color.scale_alpha(0.28))
         } else {
             None
         };
         container::Style {
             background: background.map(Into::into),
             border: Border {
-                color: if selected {
-                    p.primary.base.color.scale_alpha(0.45)
-                } else {
-                    Color::TRANSPARENT
-                },
-                width: 1.0,
                 radius: RADIUS_MD.into(),
+                ..Border::default()
             },
             ..container::Style::default()
         }
@@ -291,11 +298,16 @@ fn drop_inside_style(theme: &Theme) -> container::Style {
 fn card_style(theme: &Theme) -> container::Style {
     let p = theme.extended_palette();
     container::Style {
-        background: Some(p.background.weak.color.into()),
+        background: Some(if p.is_dark { p.background.weak.color } else { p.background.base.color }.into()),
         border: Border {
-            color: p.background.strong.color,
+            color: p.background.strong.color.scale_alpha(0.7),
             width: 1.0,
             radius: RADIUS_LG.into(),
+        },
+        shadow: iced::Shadow {
+            color: Color::from_rgba(0.0, 0.0, 0.0, if p.is_dark { 0.45 } else { 0.18 }),
+            offset: iced::Vector::new(0.0, 8.0),
+            blur_radius: 24.0,
         },
         ..container::Style::default()
     }
@@ -388,28 +400,53 @@ fn icon_button_style(theme: &Theme, status: button::Status) -> button::Style {
 
 fn tab_style(active: bool) -> impl Fn(&Theme) -> container::Style {
     move |theme| {
-        let p = theme.extended_palette();
+        let background = if active { Some(main_bg(theme).into()) } else { None };
         container::Style {
-            background: Some(
-                if active {
-                    p.background.weaker.color
-                } else {
-                    p.background.base.color
-                }
-                .into(),
-            ),
-            border: Border {
-                color: if active {
-                    theme.palette().primary.scale_alpha(0.7)
-                } else {
-                    p.background.strong.color.scale_alpha(0.45)
-                },
-                width: 1.0,
-                radius: RADIUS_MD.into(),
-            },
+            background,
             ..container::Style::default()
         }
     }
+}
+
+/// A 2 px line under a tab: coloured when it is the active one.
+fn underline_style(active: bool) -> impl Fn(&Theme) -> container::Style {
+    move |theme| {
+        container::Style::default().background(if active {
+            theme.palette().primary
+        } else {
+            Color::TRANSPARENT
+        })
+    }
+}
+
+/// A text tab with an underline, used for the request and response sections.
+fn underline_tab<'a>(label: String, active: bool, on_press: Message) -> Element<'a, Message> {
+    let b = button(text(label).size(13))
+        .padding(Padding::from([7, 12]).bottom(9.0))
+        .style(move |theme: &Theme, status| {
+            let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+            button::Style {
+                background: None,
+                text_color: theme.palette().text.scale_alpha(if active {
+                    1.0
+                } else if hovered {
+                    0.85
+                } else {
+                    0.55
+                }),
+                ..button::Style::default()
+            }
+        })
+        .on_press(on_press);
+    // The line is laid over the bottom edge of the button, so it is exactly as wide as the label.
+    stack![
+        b,
+        column![
+            space().height(Fill),
+            container(space()).width(Fill).height(2).style(underline_style(active)),
+        ]
+    ]
+    .into()
 }
 
 // ───────────────────────────── small builders ─────────────────────────────
@@ -603,6 +640,7 @@ mod ic {
     pub const LIBRARY: char = '\u{e100}';
     pub const CHEVRON_RIGHT: char = '\u{e06f}';
     pub const CHEVRON_DOWN: char = '\u{e06d}';
+    pub const CLOSE: char = '\u{e1b2}';
     pub const EXTERNAL: char = '\u{e0b9}';
 }
 
@@ -664,16 +702,33 @@ fn icon_button<'a>(pane: Pane, label: &'static str, on_press: Message) -> Elemen
     .into()
 }
 
-/// A draggable gap between two panels (the panels' own borders are the visible edge).
+/// A draggable gap between two areas, with a hairline in the middle.
 fn divider<'a>(which: Divider, vertical: bool) -> Element<'a, Message> {
+    let tone = move |theme: &Theme| {
+        container::Style::default().background(match which {
+            Divider::Sidebar => side_bg(theme),
+            _ => main_bg(theme),
+        })
+    };
+    let line = |w: Length, h: Length| container(space()).width(w).height(h).style(divider_style);
     let (gap, cursor): (Element<'a, Message>, _) = if vertical {
         (
-            container(space()).width(GRAB).height(Fill).into(),
+            container(line(Length::Fixed(1.0), Fill))
+                .width(GRAB)
+                .height(Fill)
+                .center_x(GRAB)
+                .style(tone)
+                .into(),
             Interaction::ResizingHorizontally,
         )
     } else {
         (
-            container(space()).width(Fill).height(GRAB).into(),
+            container(line(Fill, Length::Fixed(1.0)))
+                .width(Fill)
+                .height(GRAB)
+                .center_y(GRAB)
+                .style(tone)
+                .into(),
             Interaction::ResizingVertically,
         )
     };
@@ -684,7 +739,7 @@ fn divider<'a>(which: Divider, vertical: bool) -> Element<'a, Message> {
 }
 
 /// Width (or height) of the area where a divider can be grabbed.
-const GRAB: f32 = 8.0;
+const GRAB: f32 = 5.0;
 
 /// Does the node's name (or, for a request, its URL) contain `query` (already lowercase)?
 fn node_matches(node: &Node, query: &str) -> bool {
@@ -728,12 +783,15 @@ impl Oxide {
         } else {
             row![
                 self.collapsed_sidebar(),
-                space().width(GRAB),
+                container(space())
+                    .width(1)
+                    .height(Fill)
+                    .style(divider_style),
                 self.main_area()
             ]
             .into()
         };
-        let body = container(body).padding(8).width(Fill).height(Fill);
+        let body = container(body).width(Fill).height(Fill).style(panel_style);
 
         let mut layers = stack![body];
         if let Some(menu) = &self.menu {
@@ -765,7 +823,7 @@ impl Oxide {
 
     fn sidebar(&self) -> Element<'_, Message> {
         let header = row![
-            text("Collections").size(15).font(BOLD),
+            text("Collections").size(13).font(SEMIBOLD),
             space().width(Fill),
             tool_button(ic::IMPORT, "Import collection (Ctrl+O)", Message::MenuAction(MenuAction::ImportCollection), tooltip::Position::Bottom),
             button(container(plus_icon()).center(Fill))
@@ -791,7 +849,7 @@ impl Oxide {
             let mut line = row![input].spacing(4).align_y(iced::Center);
             if !self.search.is_empty() {
                 line = line.push(
-                    button(text("×").size(15))
+                    button(glyph(ic::CLOSE, 13.0))
                         .padding(Padding::from([0, 6]))
                         .style(icon_button_style)
                         .on_press(Message::SearchChanged(String::new())),
@@ -861,7 +919,7 @@ impl Oxide {
                 container(
                     row![
                         text(notice.text.clone()).size(12).color(tint).width(Fill),
-                        button(text("×").size(14))
+                        button(glyph(ic::CLOSE, 13.0))
                             .padding(Padding::from([0, 6]))
                             .style(icon_button_style)
                             .on_press(Message::DismissNotice),
@@ -1450,14 +1508,13 @@ impl Oxide {
                 column![
                     self.section_bar(req, rt),
                     container(space()).width(Fill).height(1).style(divider_style),
-                ]
-                .spacing(8),
+                ],
                 container(self.section_content(req, rt))
                     .width(Fill)
                     .height(Length::FillPortion(1)),
             ]
-            .spacing(10)
-            .padding(12),
+            .spacing(12)
+            .padding(Padding::from([14, 16])),
         )
         .width(Fill)
         .height(Fill)
@@ -1469,16 +1526,15 @@ impl Oxide {
         } else {
             (Pane::Right, "Dock response on the right")
         };
-        let response_bar = row![
-            space().width(Fill),
-            icon_button(pane, label, Message::ToggleResponseLayout),
-        ]
-        .padding(Padding::from([4, 12]));
-        let response = column![
-            response_bar,
+        let response = stack![
             container(self.response_panel(rt))
-                .padding(Padding::from([0, 12]).bottom(12.0))
+                .padding(Padding::from([12, 16]))
+                .width(Fill)
                 .height(Fill),
+            container(icon_button(pane, label, Message::ToggleResponseLayout))
+                .padding(Padding::from([8, 12]))
+                .width(Fill)
+                .align_x(iced::alignment::Horizontal::Right),
         ];
         let response = |width: Length, height: Length| {
             container(response)
@@ -1519,7 +1575,7 @@ impl Oxide {
         };
 
         column![self.tab_bar(), content]
-            .spacing(8)
+            .spacing(0)
             .width(Fill)
             .height(Fill)
             .into()
@@ -1584,19 +1640,22 @@ impl Oxide {
                 } else {
                     Element::from(space())
                 },
-                button(text("×").size(15))
-                    .padding(Padding::from([0, 5]))
+                button(glyph(ic::CLOSE, 12.0))
+                    .padding(Padding::from([3, 5]))
                     .style(icon_button_style)
                     .on_press(Message::CloseTab(id)),
             ]
             .spacing(8)
             .align_y(iced::Center)
-            .padding(Padding::from([5, 8]));
+            .padding(Padding::from([4, 10]));
 
-            let tab_view = container(content)
-                .width(190)
-                .clip(true)
-                .style(tab_style(active));
+            let tab_view = column![
+                container(content)
+                    .width(190)
+                    .clip(true)
+                    .style(tab_style(active)),
+                container(space()).width(190).height(2).style(underline_style(active)),
+            ];
 
             let dragging = self
                 .tab_drag
@@ -1615,12 +1674,19 @@ impl Oxide {
         });
 
         mouse_area(
-            scrollable(Row::with_children(tabs).spacing(6))
-                .id(TABS_ID)
-                .direction(scrollable::Direction::Horizontal(
-                    scrollable::Scrollbar::new().width(3).scroller_width(3),
-                ))
-                .width(Fill),
+            column![
+                container(
+                    scrollable(Row::with_children(tabs))
+                        .id(TABS_ID)
+                        .direction(scrollable::Direction::Horizontal(
+                            scrollable::Scrollbar::new().width(3).scroller_width(3),
+                        ))
+                        .width(Fill),
+                )
+                .width(Fill)
+                .style(strip_style),
+                container(space()).width(Fill).height(1).style(divider_style),
+            ],
         )
         .on_scroll(Message::TabsScrolled)
         .into()
@@ -1636,15 +1702,18 @@ impl Oxide {
         let methods = pick_list(Method::ALL, Some(req.method), |m| {
             Message::Edit(Edit::Method(m))
         })
-        .width(125)
-        .padding(Padding::from([8, 12]))
+        .width(112)
+        .padding(Padding::from([9, 12]))
         .font(BOLD)
         .style(move |theme: &Theme, status| {
             let mut style = pick_style(theme, status);
             style.text_color = tint;
             style.handle_color = tint;
-            style.background = tint.scale_alpha(0.12).into();
-            style.border.color = tint.scale_alpha(0.55);
+            style.background = Background::Color(Color::TRANSPARENT);
+            style.border = Border {
+                radius: RADIUS_MD.into(),
+                ..Border::default()
+            };
             style
         })
         .menu_style(|theme: &Theme| {
@@ -1653,12 +1722,13 @@ impl Oxide {
             style
         });
 
-        let url = self.var_input(
+        let url = self.var_input_with(
+            InputLook::Bare,
             "Enter URL",
             &req.url,
-            16.0,
-            8.0,
-            self.editor_width() - 125.0 - 90.0 - 16.0,
+            15.0,
+            9.0,
+            self.editor_width() - 112.0 - 90.0 - 32.0,
             |s| Message::Edit(Edit::Url(s)),
             Some(Message::Send),
         );
@@ -1672,10 +1742,34 @@ impl Oxide {
                 .style(primary_button)
                 .on_press(Message::Send)
         }
-        .width(90)
-        .padding(8);
+        .width(84)
+        .padding(Padding::from([9, 8]));
 
-        row![methods, url, action]
+        let field = container(
+            row![
+                methods,
+                container(space()).width(1).height(20).style(divider_style),
+                url,
+            ]
+            .spacing(4)
+            .align_y(iced::Center),
+        )
+        .padding(2)
+        .width(Fill)
+        .style(|theme: &Theme| {
+            let p = theme.extended_palette();
+            container::Style {
+                background: Some(p.background.weak.color.scale_alpha(0.5).into()),
+                border: Border {
+                    color: p.background.strong.color.scale_alpha(0.8),
+                    width: 1.0,
+                    radius: 10.0.into(),
+                },
+                ..container::Style::default()
+            }
+        });
+
+        row![field, action]
             .spacing(8)
             .align_y(iced::Center)
             .into()
@@ -1739,14 +1833,10 @@ impl Oxide {
         ];
 
         let mut bar = Row::with_children(sections.into_iter().map(|(section, label)| {
-            button(text(label).size(13))
-                .padding(Padding::from([5, 12]))
-                .style(pill_style(rt.section == section))
-                .on_press(Message::SectionChanged(section))
-                .into()
+            underline_tab(label, rt.section == section, Message::SectionChanged(section))
         }))
-        .spacing(4)
-        .align_y(iced::Center);
+        .spacing(2)
+        .align_y(iced::alignment::Vertical::Bottom);
 
         // Shortcut to the variables of this request's collection.
         if let Some(root) = self
@@ -2019,7 +2109,7 @@ impl Oxide {
                     InputLook::Classic => {
                         classic_input_style(theme, text_input::Status::Active).background
                     }
-                    InputLook::Blend => Background::Color(Color::TRANSPARENT),
+                    InputLook::Blend | InputLook::Bare => Background::Color(Color::TRANSPARENT),
                 };
                 container::Style {
                     background: coloured.then_some(base),
@@ -2036,6 +2126,13 @@ impl Oxide {
                 InputLook::Url => url_style(theme, status),
                 InputLook::Classic => classic_input_style(theme, status),
                 InputLook::Blend => input_style(theme, status),
+                InputLook::Bare => {
+                    let mut style = text_input::default(theme, status);
+                    style.background = Background::Color(Color::TRANSPARENT);
+                    style.border.color = Color::TRANSPARENT;
+                    style.border.width = 0.0;
+                    style
+                }
             };
             if coloured {
                 style.background = Background::Color(Color::TRANSPARENT);
@@ -2895,18 +2992,27 @@ impl Oxide {
                     .into()
             };
 
+        let code = status_color(resp.status);
+        let chip = container(
+            text(format!("{} {}", resp.status, resp.status_text).trim().to_string())
+                .size(12)
+                .font(SEMIBOLD)
+                .color(code),
+        )
+        .padding(Padding::from([3, 10]))
+        .style(move |_theme: &Theme| container::Style {
+            background: Some(code.scale_alpha(0.14).into()),
+            border: Border {
+                radius: 999.0.into(),
+                ..Border::default()
+            },
+            ..container::Style::default()
+        });
         let summary = row![
             text("Response").size(13).font(BOLD),
-            space().width(8),
-            stat(
-                "Status:",
-                format!("{} {}", resp.status, resp.status_text)
-                    .trim()
-                    .to_string(),
-                Some(status_color(resp.status)),
-            ),
-            stat("Time:", format_duration(resp.elapsed), None),
-            stat("Size:", format_size(resp.size), None),
+            chip,
+            stat("Time", format_duration(resp.elapsed), None),
+            stat("Size", format_size(resp.size), None),
         ]
         .spacing(18)
         .align_y(iced::Center);
@@ -2924,13 +3030,10 @@ impl Oxide {
             (ResponseTab::Info, "Info".to_string()),
         ];
         let tab_row = Row::with_children(tabs.into_iter().map(|(tab, label)| {
-            button(text(label).size(13))
-                .padding(Padding::from([4, 10]))
-                .style(pill_style(rt.response_tab == tab))
-                .on_press(Message::ResponseTabChanged(tab))
-                .into()
+            underline_tab(label, rt.response_tab == tab, Message::ResponseTabChanged(tab))
         }))
-        .spacing(4);
+        .spacing(2)
+        .align_y(iced::alignment::Vertical::Bottom);
 
         let tools: Element<'a, Message> = if rt.response_tab == ResponseTab::Body {
             let view_button = |label: &'static str, view: BodyView| {
@@ -3075,10 +3178,13 @@ impl Oxide {
 
         column![
             summary,
-            row![tab_row, space().width(Fill), tools].align_y(iced::Center),
+            column![
+                row![tab_row, space().width(Fill), tools].align_y(iced::Center),
+                container(space()).width(Fill).height(1).style(divider_style),
+            ],
             content,
         ]
-        .spacing(8)
+        .spacing(10)
         .into()
     }
 }
@@ -3484,7 +3590,7 @@ fn kv_table<'a>(
         let remove: Element<'a, Message> = if is_last && kv.is_blank() {
             space().width(30).into()
         } else {
-            button(text("×").size(15).center())
+            button(glyph(ic::CLOSE, 13.0).center())
                 .width(30)
                 .padding(Padding::from([2, 0]))
                 .style(icon_button_style)

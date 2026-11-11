@@ -38,6 +38,11 @@ fn window_icon() -> Option<window::Icon> {
 fn main() -> iced::Result {
     iced::application(Oxide::new, Oxide::update, Oxide::view)
         .font(include_bytes!("../assets/icons.ttf").as_slice())
+        .font(include_bytes!("../assets/inter-regular.ttf").as_slice())
+        .font(include_bytes!("../assets/inter-semibold.ttf").as_slice())
+        .font(include_bytes!("../assets/inter-bold.ttf").as_slice())
+        .font(include_bytes!("../assets/inter-italic.ttf").as_slice())
+        .default_font(iced::Font::with_name("Inter"))
         .title(Oxide::title)
         .theme(Oxide::theme)
         .subscription(Oxide::subscription)
