@@ -1109,6 +1109,13 @@ impl Oxide {
                     true,
                     false,
                 ),
+                Item(
+                    "Copy as cURL",
+                    None,
+                    MenuAction::CopyCurl,
+                    matches!(menu.target, MenuTarget::Node(id) if self.tree.request(id).is_some()),
+                    false,
+                ),
                 Separator,
                 Item(
                     "Import Collection…",
@@ -1168,6 +1175,8 @@ impl Oxide {
                     false,
                 ),
                 Item("Close All", None, MenuAction::CloseAll, true, false),
+                Separator,
+                Item("Copy as cURL", None, MenuAction::CopyCurl, true, false),
             ],
         };
 
@@ -1644,12 +1653,20 @@ impl Oxide {
             .active
             .map(|id| self.tree.ancestors(id).last().copied().unwrap_or(id))
         {
-            bar = bar.push(space().width(Fill)).push(
-                button(text("Variables").size(12))
-                    .padding(Padding::from([4, 10]))
-                    .style(icon_button_style)
-                    .on_press(Message::OpenVariables(VarScope::Collection(root))),
-            );
+            bar = bar
+                .push(space().width(Fill))
+                .push(
+                    button(text("Copy as cURL").size(12))
+                        .padding(Padding::from([4, 10]))
+                        .style(icon_button_style)
+                        .on_press(Message::CopyCurl),
+                )
+                .push(
+                    button(text("Variables").size(12))
+                        .padding(Padding::from([4, 10]))
+                        .style(icon_button_style)
+                        .on_press(Message::OpenVariables(VarScope::Collection(root))),
+                );
         }
         bar.into()
     }
@@ -2593,6 +2610,12 @@ impl Oxide {
                         .padding(Padding::from([3, 8]))
                         .style(pill_style(false))
                         .on_press(Message::CopyBody),
+                )
+                .push(
+                    button(text("Save…").size(12))
+                        .padding(Padding::from([3, 8]))
+                        .style(pill_style(false))
+                        .on_press(Message::SaveResponse),
                 );
             tools.into()
         } else {
@@ -2766,7 +2789,6 @@ fn media_tools<'a>(preview: &'a crate::media::Preview) -> Element<'a, Message> {
     tools
         .push(space().width(6))
         .push(small("Open", Message::OpenMedia))
-        .push(small("Save…", Message::SaveMedia))
         .into()
 }
 

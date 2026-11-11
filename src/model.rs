@@ -96,7 +96,7 @@ fn split_url(url: &str) -> (&str, &str, &str) {
 }
 
 /// Decodes `%XX` sequences (a `+` stays a plus). Invalid sequences are kept as typed.
-fn percent_decode(s: &str) -> String {
+pub fn percent_decode(s: &str) -> String {
     fn hex(b: u8) -> Option<u8> {
         match b {
             b'0'..=b'9' => Some(b - b'0'),

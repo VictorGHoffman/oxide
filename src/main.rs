@@ -2,6 +2,7 @@
 
 mod app;
 mod certs;
+mod curl;
 mod highlight;
 mod htmlview;
 mod http;

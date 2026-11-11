@@ -24,6 +24,10 @@ Use it to build, send and inspect HTTP requests, organise them into collections,
 - Optionally trust a private certificate authority (CA) for that host, useful for internal servers whose certificate is not from a public authority.
 - Each entry shows right away whether its files could be read, and can be switched off without deleting it.
 
+### cURL
+- **Copy as cURL** from the right-click menu of a request or tab, or from the button above the request's tabs. Variables are replaced by their values.
+- **Paste a cURL command into the URL box** and Oxide fills in the whole request: method, URL, query params, headers, cookies, body (JSON, XML, text, form, file) and Bearer or Basic auth. Multi-line commands copied from documentation or browser dev tools work too.
+
 ### Collections
 - Collections, folders and requests in a sidebar tree.
 - Drag and drop to reorder items or move them between folders, with a drop indicator while dragging.
@@ -43,7 +47,7 @@ Use it to build, send and inspect HTTP requests, organise them into collections,
 - Open an HTML response in your default browser.
 - **Image preview** (PNG, JPEG, GIF, WebP, BMP) and **PDF preview** with page navigation. Zoom in and out, fit an image to the panel, open the file in your default program or save it to disk.
 - Status, time and size at a glance, plus response headers and cookies.
-- Copy the response body.
+- Copy the response body, or **save it to a file** (text, images, PDFs and any other download; the file name comes from the server or the URL).
 
 ### Interface
 - Dark and light themes.

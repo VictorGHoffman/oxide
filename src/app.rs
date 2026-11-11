@@ -7,6 +7,7 @@ use iced::widget::{operation, scrollable, text_editor};
 use iced::{event, keyboard, mouse, window, Event, Point, Size, Subscription, Task, Theme};
 
 use crate::certs::{self, CertKind, ClientCert};
+use crate::curl;
 use crate::htmlview;
 use crate::http;
 use crate::jsontree;
@@ -128,6 +129,7 @@ pub enum MenuAction {
     ExportCollection,
     EditVariables,
     ShowInFolder,
+    CopyCurl,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -302,8 +304,11 @@ pub enum Message {
     PdfPage(PdfNav),
     /// Open the image or PDF with the system's default program.
     OpenMedia,
-    SaveMedia,
-    MediaSaved(Result<Option<String>, String>),
+    /// Save the body of the response to a file.
+    SaveResponse,
+    ResponseSaved(Result<Option<String>, String>),
+    /// Copy the active request as a curl command.
+    CopyCurl,
     ResponseAction(text_editor::Action),
     CopyBody,
 }
@@ -1031,6 +1036,11 @@ impl Oxide {
                     });
                 }
             }
+            MenuAction::CopyCurl => {
+                if let Some(id) = node_target {
+                    return self.copy_curl(id);
+                }
+            }
             MenuAction::ExportCollection => {
                 self.commit_rename();
                 self.notice = None;
@@ -1467,6 +1477,11 @@ impl Oxide {
             Message::Edit(edit) if is_variables_edit(&edit) => self.edit_variables(edit),
             Message::Edit(edit) => {
                 if let Some(id) = self.active {
+                    if let Edit::Url(text) = &edit {
+                        if self.import_curl(id, text) {
+                            return Task::none();
+                        }
+                    }
                     let before = self.tree.request(id).cloned();
                     // A token belongs to the settings it was requested with.
                     let invalidates_token = matches!(
@@ -1723,20 +1738,24 @@ impl Oxide {
                     }
                 }
             }
-            Message::SaveMedia => {
-                let media = self
+            Message::SaveResponse => {
+                let saved = self
                     .active
                     .and_then(|id| self.runtime.get(&id))
                     .and_then(|rt| match &rt.state {
-                        ResponseState::Done(resp) => resp.media.clone().map(|m| (m, resp.final_url.clone())),
+                        ResponseState::Done(resp) => Some((
+                            resp.bytes
+                                .clone()
+                                .unwrap_or_else(|| std::sync::Arc::new(resp.body_raw.clone().into_bytes())),
+                            response_file_name(resp),
+                        )),
                         _ => None,
                     });
-                if let Some((media, url)) = media {
-                    let name = suggested_file_name(&url, media::extension(&media.bytes));
-                    return Task::perform(save_media(name, media.bytes), Message::MediaSaved);
+                if let Some((bytes, name)) = saved {
+                    return Task::perform(save_media(name, bytes), Message::ResponseSaved);
                 }
             }
-            Message::MediaSaved(result) => match result {
+            Message::ResponseSaved(result) => match result {
                 Ok(Some(name)) => {
                     self.notice = Some(Notice {
                         text: format!("Saved to {name}."),
@@ -1751,6 +1770,11 @@ impl Oxide {
                     });
                 }
             },
+            Message::CopyCurl => {
+                if let Some(id) = self.active {
+                    return self.copy_curl(id);
+                }
+            }
             Message::ResponseAction(action) => {
                 // Read-only: allow selecting/copying/scrolling, ignore edits.
                 if !action.is_edit() {
@@ -1937,6 +1961,63 @@ impl Oxide {
         match scope {
             VarScope::Global => Some(&self.globals),
             VarScope::Collection(id) => self.tree.get(id).map(|n| &n.variables),
+        }
+    }
+
+    /// Puts the request as a `curl` command on the clipboard.
+    fn copy_curl(&mut self, id: Id) -> Task<Message> {
+        let Some(request) = self.tree.request(id) else {
+            return Task::none();
+        };
+        let request = vars::resolve(request, &|name| self.lookup_variable(id, name));
+        let token = self.tokens.get(&id).map(|t| t.access_token.clone());
+        let command = curl::export(&request, token.as_deref());
+        self.notice = Some(Notice {
+            text: "Copied as cURL.".into(),
+            error: false,
+        });
+        iced::clipboard::write(command)
+    }
+
+    /// Pasting a `curl` command into the URL box fills in the whole request.
+    /// Returns `true` when that happened.
+    fn import_curl(&mut self, id: Id, text: &str) -> bool {
+        let pasted = self
+            .tree
+            .request(id)
+            .is_some_and(|req| text.len() > req.url.len() + 1);
+        if !pasted || !curl::looks_like_curl(text) {
+            return false;
+        }
+        match curl::parse(text) {
+            Ok(imported) => {
+                let before = self.tree.request(id).cloned();
+                if let Some(req) = self.tree.request_mut(id) {
+                    curl::apply(req, imported);
+                }
+                if let Some(rt) = self.runtime.get_mut(&id) {
+                    let body = self
+                        .tree
+                        .request(id)
+                        .map(|r| r.body_text.clone())
+                        .unwrap_or_default();
+                    rt.body_editor = text_editor::Content::with_text(&body);
+                }
+                self.pin(id);
+                self.record_history(id, before);
+                self.notice = Some(Notice {
+                    text: "Imported the cURL command.".into(),
+                    error: false,
+                });
+                true
+            }
+            Err(e) => {
+                self.notice = Some(Notice {
+                    text: format!("Could not import the cURL command: {e}"),
+                    error: true,
+                });
+                false
+            }
         }
     }
 
@@ -2692,9 +2773,53 @@ fn reveal_file(path: &std::path::Path) -> Result<(), String> {
     command.spawn().map(|_| ()).map_err(|e| e.to_string())
 }
 
-/// The last part of a URL's path, or `response.<ext>`.
-fn suggested_file_name(url: &str, extension: &str) -> String {
-    let name = reqwest::Url::parse(url)
+/// A file name for the response: the one the server suggests, else the end of the URL.
+fn response_file_name(resp: &http::Response) -> String {
+    // Content-Disposition: attachment; filename="report.pdf"
+    let from_header = resp.header("content-disposition").and_then(|value| {
+        let lower = value.to_ascii_lowercase();
+        let at = lower.find("filename=")?;
+        let rest = value[at + 9..].trim_start();
+        let name = match rest.strip_prefix('"') {
+            Some(quoted) => quoted.split('"').next()?.to_string(),
+            None => rest.split(';').next()?.trim().to_string(),
+        };
+        let name = safe_file_name(&name);
+        (!name.is_empty()).then_some(name)
+    });
+    if let Some(name) = from_header {
+        return name;
+    }
+
+    let extension = match &resp.media {
+        Some(media) => media::extension(&media.bytes),
+        None => {
+            let kind = resp
+                .header("content-type")
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            if kind.contains("json") {
+                "json"
+            } else if kind.contains("html") {
+                "html"
+            } else if kind.contains("xml") {
+                "xml"
+            } else if kind.contains("csv") {
+                "csv"
+            } else if kind.contains("javascript") {
+                "js"
+            } else if kind.contains("css") {
+                "css"
+            } else if kind.contains("zip") {
+                "zip"
+            } else if resp.is_binary {
+                "bin"
+            } else {
+                "txt"
+            }
+        }
+    };
+    let name = reqwest::Url::parse(&resp.final_url)
         .ok()
         .and_then(|u| {
             u.path_segments()
@@ -2702,13 +2827,13 @@ fn suggested_file_name(url: &str, extension: &str) -> String {
         })
         .filter(|n| !n.is_empty() && n.len() < 100);
     match name {
-        Some(n) if n.rsplit_once('.').is_some_and(|(_, e)| e.len() <= 5) => n,
+        Some(n) if n.rsplit_once('.').is_some_and(|(_, e)| (1..=5).contains(&e.len())) => n,
         Some(n) => format!("{n}.{extension}"),
         None => format!("response.{extension}"),
     }
 }
 
-/// Asks where to save a downloaded image / PDF and writes it there.
+/// Asks where to save the body of a response and writes it there.
 async fn save_media(
     name: String,
     bytes: std::sync::Arc<Vec<u8>>,

@@ -28,7 +28,9 @@ pub struct Response {
     pub body_raw: String,
     pub body_pretty: String,
     pub is_binary: bool,
-    /// An image or PDF body, kept as bytes for the preview.
+    /// The exact body when it is not text (images, PDFs, downloads).
+    pub bytes: Option<std::sync::Arc<Vec<u8>>>,
+    /// An image or PDF body, for the preview.
     pub media: Option<crate::media::Media>,
 }
 
@@ -58,7 +60,7 @@ fn enabled(rows: &[KeyValue]) -> impl Iterator<Item = &KeyValue> {
         .filter(|r| r.enabled && !r.key.trim().is_empty())
 }
 
-fn build_url(req: &Request) -> Result<reqwest::Url, String> {
+pub fn build_url(req: &Request) -> Result<reqwest::Url, String> {
     let raw = req.url.trim();
     if raw.is_empty() {
         return Err("Please enter a URL.".into());
@@ -243,9 +245,12 @@ pub async fn send(req: Request) -> Result<Response, String> {
             .unwrap_or_else(|| body_raw.clone())
     };
 
+    let shared = is_binary.then(|| std::sync::Arc::new(bytes.to_vec()));
     let media = crate::media::sniff(&bytes).map(|kind| crate::media::Media {
         kind,
-        bytes: std::sync::Arc::new(bytes.to_vec()),
+        bytes: shared
+            .clone()
+            .unwrap_or_else(|| std::sync::Arc::new(bytes.to_vec())),
     });
 
     Ok(Response {
@@ -261,6 +266,7 @@ pub async fn send(req: Request) -> Result<Response, String> {
         body_raw,
         body_pretty,
         is_binary,
+        bytes: shared,
         media,
     })
 }
