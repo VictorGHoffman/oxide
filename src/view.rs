@@ -583,11 +583,8 @@ impl Oxide {
                 layers = layers.push(dialog);
             }
         }
-        if self.certs_open {
-            layers = layers.push(self.certs_dialog());
-        }
-        if self.backup_open {
-            layers = layers.push(self.backup_dialog());
+        if let Some(tab) = self.settings_tab {
+            layers = layers.push(self.settings_dialog(tab));
         }
         if let Some(palette) = &self.palette {
             layers = layers.push(self.palette_overlay(palette));
@@ -827,41 +824,23 @@ impl Oxide {
         .into()
     }
 
-    /// Theme picker and light/dark switch at the bottom of the sidebar.
+    /// Global variables, settings and the light/dark switch at the bottom of the sidebar.
     fn theme_bar(&self) -> Element<'_, Message> {
         container(
-            column![
-                row![
-                    button(text("Globals").size(12))
-                        .padding(Padding::from([5, 10]))
-                        .style(pill_style(false))
-                        .on_press(Message::OpenVariables(VarScope::Global)),
-                    button(text("Certificates").size(12))
-                        .padding(Padding::from([5, 10]))
-                        .style(pill_style(false))
-                        .on_press(Message::OpenCerts),
-                    button(text("Backup").size(12))
-                        .padding(Padding::from([5, 10]))
-                        .style(pill_style(false))
-                        .on_press(Message::OpenBackup),
-                ]
-                .spacing(6),
-                row![
-                    pick_list(
-                        theme::Choice::all(),
-                        Some(theme::Choice(self.theme_index)),
-                        Message::SetTheme
-                    )
-                    .width(Fill)
+            row![
+                button(text("Globals").size(12))
                     .padding(Padding::from([5, 10]))
-                    .text_size(12)
-                    .style(pick_style),
-                    self.theme_toggle(),
-                ]
-                .spacing(6)
-                .align_y(iced::Center),
+                    .style(pill_style(false))
+                    .on_press(Message::OpenVariables(VarScope::Global)),
+                button(text("Settings").size(12))
+                    .padding(Padding::from([5, 10]))
+                    .style(pill_style(false))
+                    .on_press(Message::OpenSettings(SettingsTab::Appearance)),
+                space().width(Fill),
+                self.theme_toggle(),
             ]
-            .spacing(6),
+            .spacing(6)
+            .align_y(iced::Center),
         )
         .padding(Padding::from([8, 10]))
         .width(Fill)
@@ -1458,22 +1437,10 @@ impl Oxide {
                     .size(14)
                     .style(muted),
                 space().height(16),
-                hint("Shift+Click", "Select a range"),
-                hint("Ctrl+Click", "Add to selection"),
                 hint("Ctrl+N", "New request"),
-                hint("Ctrl+Shift+N", "New folder"),
-                hint("Ctrl+Enter", "Send request"),
-                hint("Ctrl+K / F1", "Command palette"),
                 hint("Ctrl+O", "Import collection"),
-                hint("Ctrl+S", "Save request"),
-                hint("Ctrl+Z / Ctrl+Y", "Undo / redo"),
-                hint("Ctrl+B", "Show / hide sidebar"),
-                hint("Ctrl+F", "Search requests"),
-                hint("Ctrl+D", "Duplicate"),
-                hint("F2", "Rename"),
-                hint("Del", "Delete"),
-                hint("Ctrl+1…9", "Switch tab"),
-                hint("Ctrl+W", "Close tab"),
+                hint("Ctrl+K / F1", "Command palette"),
+                hint("Ctrl+,", "Settings and shortcuts"),
             ]
             .spacing(6)
             .align_x(iced::Center),
@@ -2199,75 +2166,207 @@ impl Oxide {
         .into()
     }
 
-    /// Export everything to one file, or bring it back.
-    fn backup_dialog(&self) -> Element<'_, Message> {
-        let collections = self.tree.roots.len();
-        let requests = self.tree.requests().len();
+    /// The settings window: pages on the left, the selected page on the right.
+    fn settings_dialog(&self, tab: SettingsTab) -> Element<'_, Message> {
+        let nav = Column::with_children(SettingsTab::ALL.iter().map(|t| {
+            button(text(t.label()).size(13).width(Fill))
+                .width(Fill)
+                .padding(Padding::from([7, 12]))
+                .style(pill_style(*t == tab))
+                .on_press(Message::OpenSettings(*t))
+                .into()
+        }))
+        .spacing(2)
+        .width(170);
 
+        let page: Element<'_, Message> = match tab {
+            SettingsTab::Appearance => self.appearance_panel(),
+            SettingsTab::Requests => self.requests_panel(),
+            SettingsTab::Certificates => self.certs_panel(),
+            SettingsTab::Data => self.data_panel(),
+            SettingsTab::Shortcuts => shortcuts_panel(),
+        };
+
+        let height = (self.window_size.height - 80.0).clamp(380.0, 600.0);
         let card = container(
             column![
-                text("Backup").size(17).font(BOLD),
-                text(format!(
-                    "Right now: {collections} collection{}, {requests} request{} and {} global variable{}.",
-                    if collections == 1 { "" } else { "s" },
-                    if requests == 1 { "" } else { "s" },
-                    self.globals.iter().filter(|g| !g.key.trim().is_empty()).count(),
-                    if self.globals.iter().filter(|g| !g.key.trim().is_empty()).count() == 1 { "" } else { "s" },
-                ))
-                .size(13)
-                .style(muted),
-                column![
-                    text("Export").size(14).font(SEMIBOLD),
-                    text("Saves every collection (with its variables) and the global variables in a single file. Changes you have not saved with Ctrl+S are not included.")
-                        .size(12)
-                        .style(muted),
-                    button(text("Export backup…").size(13).center())
-                        .padding(Padding::from([7, 14]))
-                        .style(primary_button)
-                        .on_press(Message::ExportBackup),
-                ]
-                .spacing(6),
-                column![
-                    text("Restore").size(14).font(SEMIBOLD),
-                    text("Adds the collections of a backup next to yours (nothing is deleted or overwritten) and sets its global variables. A global with the same name gets the value from the backup.")
-                        .size(12)
-                        .style(muted),
-                    button(text("Restore backup…").size(13).center())
-                        .padding(Padding::from([7, 14]))
-                        .style(pill_style(false))
-                        .on_press(Message::RestoreBackup),
-                ]
-                .spacing(6),
-                text("Certificates and OAuth 2.0 tokens are not part of a backup: they point to files on this computer and hold secrets.")
-                    .size(12)
-                    .style(muted),
                 row![
+                    text("Settings").size(18).font(BOLD),
                     space().width(Fill),
                     button(text("Close").size(13).center())
-                        .padding(Padding::from([7, 18]))
+                        .padding(Padding::from([6, 16]))
                         .style(primary_button)
-                        .on_press(Message::CloseBackup),
-                ],
+                        .on_press(Message::CloseSettings),
+                ]
+                .align_y(iced::Center),
+                row![
+                    nav,
+                    container(space()).width(1).height(Fill).style(divider_style),
+                    scrollable(container(page).padding(Padding::from([0, 14]).right(18)))
+                        .width(Fill)
+                        .height(Fill),
+                ]
+                .spacing(14)
+                .height(Fill),
             ]
             .spacing(14),
         )
         .padding(20)
-        .width(520)
+        .width(Length::Fixed((self.window_size.width - 80.0).clamp(520.0, 860.0)))
+        .height(Length::Fixed(height))
         .style(card_style);
 
         let dim = opaque(
             mouse_area(container(space()).width(Fill).height(Fill).style(|_| {
                 container::Style::default().background(Color::from_rgba(0.0, 0.0, 0.0, 0.55))
             }))
-            .on_press(Message::CloseBackup)
-            .on_right_press(Message::CloseBackup),
+            .on_press(Message::CloseSettings)
+            .on_right_press(Message::CloseSettings),
         );
 
         stack![dim, container(opaque(card)).center(Fill)].into()
     }
 
+    fn appearance_panel(&self) -> Element<'_, Message> {
+        let choice = |label: &'static str, right: bool| {
+            let active = self.response_right == right;
+            let mut b = button(text(label).size(13))
+                .padding(Padding::from([6, 12]))
+                .style(pill_style(active));
+            if !active {
+                b = b.on_press(Message::ToggleResponseLayout);
+            }
+            b
+        };
+
+        column![
+            text("Appearance").size(16).font(BOLD),
+            labeled(
+                "Theme",
+                row![
+                    pick_list(
+                        theme::Choice::all(),
+                        Some(theme::Choice(self.theme_index)),
+                        Message::SetTheme
+                    )
+                    .width(240)
+                    .padding(6)
+                    .style(pick_style),
+                    self.theme_toggle(),
+                ]
+                .spacing(10)
+                .align_y(iced::Center),
+            ),
+            text("Each theme has a dark and a light version. The sun / moon button next to the theme (also in the sidebar) switches between them.")
+                .size(12)
+                .style(muted),
+            space().height(6),
+            labeled(
+                "Response",
+                row![choice("Below the request", false), choice("Beside the request", true)]
+                    .spacing(6),
+            ),
+        ]
+        .spacing(12)
+        .into()
+    }
+
+    fn requests_panel(&self) -> Element<'_, Message> {
+        column![
+            text("Requests").size(16).font(BOLD),
+            labeled(
+                "Timeout (s)",
+                text_input("120", &self.timeout_text)
+                    .style(input_style)
+                    .on_input(Message::SettingTimeout)
+                    .size(13)
+                    .padding(6)
+                    .width(100),
+            ),
+            text("How long to wait for a response before giving up. Leave it empty or 0 for no limit.")
+                .size(12)
+                .style(muted),
+            space().height(6),
+            checkbox(self.settings.follow_redirects)
+                .label("Follow redirects")
+                .on_toggle(Message::SettingRedirects)
+                .style(checkbox_style),
+            text("When off, a 301 / 302 answer is shown as it is instead of being followed.")
+                .size(12)
+                .style(muted),
+            space().height(6),
+            checkbox(self.settings.verify_tls)
+                .label("Verify TLS certificates")
+                .on_toggle(Message::SettingVerifyTls)
+                .style(checkbox_style),
+            text("Turn this off only to reach a test server with a self-signed certificate. Anyone on the network could then impersonate the server.")
+                .size(12)
+                .style(muted),
+        ]
+        .spacing(8)
+        .into()
+    }
+
+    /// Export everything to one file, or bring it back.
+    fn data_panel(&self) -> Element<'_, Message> {
+        let collections = self.tree.roots.len();
+        let requests = self.tree.requests().len();
+        let globals = self.globals.iter().filter(|g| !g.key.trim().is_empty()).count();
+        let plural = |n: usize| if n == 1 { "" } else { "s" };
+
+        column![
+            text("Data & backup").size(16).font(BOLD),
+            text(format!(
+                "Right now: {collections} collection{}, {requests} request{} and {globals} global variable{}.",
+                plural(collections),
+                plural(requests),
+                plural(globals),
+            ))
+            .size(13)
+            .style(muted),
+            column![
+                text("Export").size(14).font(SEMIBOLD),
+                text("Saves every collection (with its variables) and the global variables in a single file. Changes you have not saved with Ctrl+S are not included.")
+                    .size(12)
+                    .style(muted),
+                button(text("Export backup…").size(13).center())
+                    .padding(Padding::from([7, 14]))
+                    .style(primary_button)
+                    .on_press(Message::ExportBackup),
+            ]
+            .spacing(6),
+            column![
+                text("Restore").size(14).font(SEMIBOLD),
+                text("Adds the collections of a backup next to yours (nothing is deleted or overwritten) and sets its global variables. A global with the same name gets the value from the backup.")
+                    .size(12)
+                    .style(muted),
+                button(text("Restore backup…").size(13).center())
+                    .padding(Padding::from([7, 14]))
+                    .style(pill_style(false))
+                    .on_press(Message::RestoreBackup),
+            ]
+            .spacing(6),
+            column![
+                text("Where your data lives").size(14).font(SEMIBOLD),
+                text("Collections, variables, certificates and settings are files in the Oxide folder inside your Documents.")
+                    .size(12)
+                    .style(muted),
+                button(text("Show in folder").size(13).center())
+                    .padding(Padding::from([7, 14]))
+                    .style(pill_style(false))
+                    .on_press(Message::MenuAction(MenuAction::ShowInFolder)),
+            ]
+            .spacing(6),
+            text("Certificates and OAuth 2.0 tokens are not part of a backup: they point to files on this computer and hold secrets.")
+                .size(12)
+                .style(muted),
+        ]
+        .spacing(14)
+        .into()
+    }
+
     /// Client certificates and private authorities, by host.
-    fn certs_dialog(&self) -> Element<'_, Message> {
+    fn certs_panel(&self) -> Element<'_, Message> {
         let green = color!(0x4caf7d);
         let red = color!(0xe5534b);
 
@@ -2395,43 +2494,19 @@ impl Oxide {
             );
         }
 
-        let card = container(
-            column![
-                text("Certificates").size(17).font(BOLD),
-                text("Each entry applies to requests sent to its host. The first enabled entry that matches is used.")
-                    .size(13)
-                    .style(muted),
-                scrollable(container(entries).padding(Padding::default().right(12)))
-                    .height(Length::Fixed(
-                        (self.window_size.height - 220.0).clamp(160.0, 520.0)
-                    )),
-                row![
-                    button(text("Add certificate").size(13).center())
-                        .padding(Padding::from([7, 14]))
-                        .style(pill_style(false))
-                        .on_press(Message::CertAdd),
-                    space().width(Fill),
-                    button(text("Close").size(13).center())
-                        .padding(Padding::from([7, 18]))
-                        .style(primary_button)
-                        .on_press(Message::CloseCerts),
-                ],
-            ]
-            .spacing(10),
-        )
-        .padding(20)
-        .width(640)
-        .style(card_style);
-
-        let dim = opaque(
-            mouse_area(container(space()).width(Fill).height(Fill).style(|_| {
-                container::Style::default().background(Color::from_rgba(0.0, 0.0, 0.0, 0.55))
-            }))
-            .on_press(Message::CloseCerts)
-            .on_right_press(Message::CloseCerts),
-        );
-
-        stack![dim, container(opaque(card)).center(Fill)].into()
+        column![
+            text("Certificates").size(16).font(BOLD),
+            text("Each entry applies to requests sent to its host. The first enabled entry that matches is used.")
+                .size(13)
+                .style(muted),
+            entries,
+            button(text("Add certificate").size(13).center())
+                .padding(Padding::from([7, 14]))
+                .style(pill_style(false))
+                .on_press(Message::CertAdd),
+        ]
+        .spacing(10)
+        .into()
     }
 
     fn auth_section<'a>(&'a self, req: &'a Request, rt: &'a Runtime) -> Element<'a, Message> {
@@ -3353,5 +3428,62 @@ fn kv_table<'a>(
             .padding(Padding::from([2, 4]).right(10)),
     )
     .height(Fill)
+    .into()
+}
+
+/// Every keyboard shortcut, by area.
+fn shortcuts_panel<'a>() -> Element<'a, Message> {
+    let group = |title: &'static str, rows: &[(&'static str, &'static str)]| -> Element<'a, Message> {
+        let mut list = Column::new().spacing(5);
+        for (keys, what) in rows {
+            list = list.push(
+                row![
+                    text(shortcut_label(keys)).size(13).width(170).font(SEMIBOLD),
+                    text(*what).size(13).style(muted),
+                ]
+                .spacing(8),
+            );
+        }
+        column![text(title).size(14).font(BOLD), list].spacing(8).into()
+    };
+
+    column![
+        text("Keyboard shortcuts").size(16).font(BOLD),
+        group(
+            "General",
+            &[
+                ("Ctrl+K  /  F1", "Command palette"),
+                ("Ctrl+,", "Settings"),
+                ("Ctrl+O", "Import collection"),
+                ("Ctrl+B", "Show / hide the sidebar"),
+                ("Ctrl+F", "Search requests"),
+                ("Esc", "Close a window, cancel a drag"),
+            ],
+        ),
+        group(
+            "Requests",
+            &[
+                ("Ctrl+Enter", "Send the request"),
+                ("Ctrl+N", "New request"),
+                ("Ctrl+Shift+N", "New folder"),
+                ("Ctrl+S", "Save the request"),
+                ("Ctrl+D", "Duplicate"),
+                ("F2", "Rename"),
+                ("Del", "Delete"),
+                ("Ctrl+Z  /  Ctrl+Y", "Undo / redo"),
+            ],
+        ),
+        group(
+            "Tabs and selection",
+            &[
+                ("Ctrl+1 … Ctrl+9", "Go to tab"),
+                ("Ctrl+W", "Close the tab"),
+                ("Shift+Click", "Select a range"),
+                ("Ctrl+Click", "Add to the selection"),
+                ("Tab / Shift+Tab", "Indent / unindent in the body and script editors"),
+            ],
+        ),
+    ]
+    .spacing(18)
     .into()
 }

@@ -80,6 +80,30 @@ pub fn save_globals(globals: &[KeyValue]) -> Result<(), String> {
     fs::rename(&tmp, &path).map_err(|e| format!("Could not save {}: {e}", path.display()))
 }
 
+// ───────────────────────────── settings ─────────────────────────────
+
+fn settings_path() -> Option<PathBuf> {
+    file_path().map(|p| p.with_file_name("settings.json"))
+}
+
+pub fn load_settings() -> crate::settings::Settings {
+    settings_path()
+        .and_then(|path| fs::read_to_string(path).ok())
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_settings(settings: &crate::settings::Settings) -> Result<(), String> {
+    let path = settings_path().ok_or("Could not find the Documents folder.")?;
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir).map_err(|e| format!("Could not create {}: {e}", dir.display()))?;
+    }
+    let json = serde_json::to_string_pretty(settings).map_err(|e| e.to_string())?;
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, json).map_err(|e| format!("Could not write {}: {e}", tmp.display()))?;
+    fs::rename(&tmp, &path).map_err(|e| format!("Could not save {}: {e}", path.display()))
+}
+
 // ───────────────────────────── certificates ─────────────────────────────
 
 fn certs_path() -> Option<PathBuf> {

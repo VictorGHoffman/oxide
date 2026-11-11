@@ -16,6 +16,7 @@ use crate::media;
 use crate::model::*;
 use crate::oauth;
 use crate::postman;
+use crate::settings::{self, Settings};
 use crate::storage;
 use crate::theme;
 use crate::vars;
@@ -170,6 +171,7 @@ pub enum Shortcut {
     Send,
     ImportCollection,
     Palette,
+    Settings,
     Up,
     Down,
 }
@@ -234,17 +236,20 @@ pub enum Message {
     PaletteRun,
     PaletteRunAt(usize),
 
+    // Settings
+    OpenSettings(SettingsTab),
+    CloseSettings,
+    SettingTimeout(String),
+    SettingVerifyTls(bool),
+    SettingRedirects(bool),
+
     // Backup
-    OpenBackup,
-    CloseBackup,
     ExportBackup,
     RestoreBackup,
     /// The text of the backup file that was picked (`None` when cancelled).
     BackupPicked(Result<Option<String>, String>),
 
     // Certificates
-    OpenCerts,
-    CloseCerts,
     CertAdd,
     CertRemove(usize),
     CertEdit(usize, CertField),
@@ -381,6 +386,36 @@ pub enum ResponseState {
     Done(Box<http::Response>),
 }
 
+/// The pages of the settings window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsTab {
+    Appearance,
+    Requests,
+    Certificates,
+    Data,
+    Shortcuts,
+}
+
+impl SettingsTab {
+    pub const ALL: [SettingsTab; 5] = [
+        SettingsTab::Appearance,
+        SettingsTab::Requests,
+        SettingsTab::Certificates,
+        SettingsTab::Data,
+        SettingsTab::Shortcuts,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SettingsTab::Appearance => "Appearance",
+            SettingsTab::Requests => "Requests",
+            SettingsTab::Certificates => "Certificates",
+            SettingsTab::Data => "Data & backup",
+            SettingsTab::Shortcuts => "Shortcuts",
+        }
+    }
+}
+
 /// The command palette (Ctrl+K).
 pub struct Palette {
     pub query: String,
@@ -500,8 +535,11 @@ pub struct Oxide {
     pub certs: Vec<ClientCert>,
     /// Whether each certificate's files could be read (same order as `certs`).
     pub cert_status: Vec<Result<(), String>>,
-    pub certs_open: bool,
-    pub backup_open: bool,
+    /// The settings window, on the page that is showing.
+    pub settings_tab: Option<SettingsTab>,
+    pub settings: Settings,
+    /// What is typed in the timeout box.
+    pub timeout_text: String,
     pub palette: Option<Palette>,
     pub sidebar_visible: bool,
     pub sidebar_width: f32,
@@ -532,6 +570,8 @@ impl Oxide {
         tree.sync_queries();
         let selected = tree.first_collection();
 
+        let settings = storage::load_settings();
+        settings::set_active(&settings);
         let certs = storage::load_certs();
         certs::set_active(&certs);
         let cert_status = certs.iter().map(ClientCert::check).collect();
@@ -559,8 +599,9 @@ impl Oxide {
             vars_dialog: None,
             certs,
             cert_status,
-            certs_open: false,
-            backup_open: false,
+            settings_tab: None,
+            timeout_text: settings.timeout_secs.to_string(),
+            settings,
             palette: None,
             sidebar_visible: true,
             sidebar_width: 280.0,
@@ -1464,12 +1505,31 @@ impl Oxide {
                 }
             }
             Message::PaletteRunAt(index) => return self.run_palette(index),
-            Message::OpenBackup => {
+            Message::OpenSettings(tab) => {
                 self.menu = None;
                 self.commit_rename();
-                self.backup_open = true;
+                self.settings_tab = Some(tab);
             }
-            Message::CloseBackup => self.backup_open = false,
+            Message::CloseSettings => self.settings_tab = None,
+            Message::SettingTimeout(text) => {
+                let digits: String = text.chars().filter(char::is_ascii_digit).take(5).collect();
+                let secs = digits.parse::<u64>().unwrap_or(0).min(settings::MAX_TIMEOUT);
+                self.timeout_text = if digits.is_empty() {
+                    String::new()
+                } else {
+                    secs.to_string()
+                };
+                self.settings.timeout_secs = secs;
+                self.settings_changed();
+            }
+            Message::SettingVerifyTls(on) => {
+                self.settings.verify_tls = on;
+                self.settings_changed();
+            }
+            Message::SettingRedirects(on) => {
+                self.settings.follow_redirects = on;
+                self.settings_changed();
+            }
             Message::ExportBackup => {
                 self.commit_rename();
                 let snapshot = self.tree.snapshot(&self.saved);
@@ -1511,7 +1571,6 @@ impl Oxide {
                         keep_trailing_blank(&mut self.globals);
                         self.save_variables(VarScope::Global);
                         self.persist();
-                        self.backup_open = false;
                         self.notice = Some(Notice {
                             text: format!(
                                 "Restored {collections} collection{} ({requests} requests) and the global variables.",
@@ -1522,12 +1581,6 @@ impl Oxide {
                     }
                 },
             },
-            Message::OpenCerts => {
-                self.menu = None;
-                self.commit_rename();
-                self.certs_open = true;
-            }
-            Message::CloseCerts => self.certs_open = false,
             Message::CertAdd => {
                 self.certs.push(ClientCert::default());
                 self.cert_status.push(Err("Enter the host this certificate is for.".into()));
@@ -1965,18 +2018,10 @@ impl Oxide {
             return Task::none();
         }
 
-        // The backup dialog too.
-        if self.backup_open {
-            if matches!(shortcut, Shortcut::Escape) {
-                self.backup_open = false;
-            }
-            return Task::none();
-        }
-
-        // So is the certificates dialog.
-        if self.certs_open {
+        // The settings window is modal too (typing goes to its fields).
+        if self.settings_tab.is_some() {
             match shortcut {
-                Shortcut::Escape => self.certs_open = false,
+                Shortcut::Escape | Shortcut::Settings => self.settings_tab = None,
                 Shortcut::FocusNext => return operation::focus_next(),
                 Shortcut::FocusPrevious => return operation::focus_previous(),
                 _ => {}
@@ -2062,6 +2107,7 @@ impl Oxide {
             Shortcut::Send => self.send_active(),
             Shortcut::ImportCollection => self.perform(MenuAction::ImportCollection, None),
             Shortcut::Palette => self.update(Message::OpenPalette),
+            Shortcut::Settings => self.update(Message::OpenSettings(SettingsTab::Appearance)),
             Shortcut::Up | Shortcut::Down => Task::none(),
         }
     }
@@ -2157,9 +2203,11 @@ impl Oxide {
             command("New Collection", "", None, Message::MenuAction(MenuAction::NewCollection)),
             command("Import Collection", "Postman v2.1", Some("Ctrl+O"), Message::MenuAction(MenuAction::ImportCollection)),
             command("Export Collection", "", None, Message::MenuAction(MenuAction::ExportCollection)),
-            command("Backup: export or restore everything", "", None, Message::OpenBackup),
+            command("Settings", "Theme, requests, certificates, shortcuts", Some("Ctrl+,"), Message::OpenSettings(SettingsTab::Appearance)),
+            command("Backup: export or restore everything", "", None, Message::OpenSettings(SettingsTab::Data)),
             command("Global Variables", "", None, Message::OpenVariables(VarScope::Global)),
-            command("Certificates", "", None, Message::OpenCerts),
+            command("Certificates", "", None, Message::OpenSettings(SettingsTab::Certificates)),
+            command("Keyboard Shortcuts", "", None, Message::OpenSettings(SettingsTab::Shortcuts)),
             command("Toggle Sidebar", "", Some("Ctrl+B"), Message::ToggleSidebar),
             command("Toggle Light / Dark Theme", "", None, Message::ToggleTheme),
             command("Dock Response Right / Bottom", "", None, Message::ToggleResponseLayout),
@@ -2298,6 +2346,17 @@ impl Oxide {
     fn active_preview(&mut self) -> Option<&mut Result<media::Preview, String>> {
         let id = self.active?;
         self.runtime.get_mut(&id)?.preview.as_mut()
+    }
+
+    /// Saves the settings and makes them the ones used for the next requests.
+    fn settings_changed(&mut self) {
+        settings::set_active(&self.settings);
+        if let Err(e) = storage::save_settings(&self.settings) {
+            self.notice = Some(Notice {
+                text: format!("Could not save the settings: {e}"),
+                error: true,
+            });
+        }
     }
 
     /// Saves the certificates and makes them the ones used for the next requests.
@@ -2918,6 +2977,7 @@ fn shortcut_for(
         ('f', false) => Some(Shortcut::FocusSearch),
         ('o', false) => Some(Shortcut::ImportCollection),
         ('k', false) => Some(Shortcut::Palette),
+        (',', false) => Some(Shortcut::Settings),
         (c @ '1'..='9', false) => Some(Shortcut::GoToTab(c as usize - '1' as usize)),
         _ => None,
     }

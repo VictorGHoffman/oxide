@@ -98,12 +98,19 @@ fn header_pair(name: &str, value: &str) -> Result<(HeaderName, HeaderValue), Str
 pub async fn send(req: Request) -> Result<Response, String> {
     let url = build_url(&req)?;
 
-    let client = crate::certs::apply(
-        reqwest::Client::builder()
-            .user_agent(concat!("Oxide/", env!("CARGO_PKG_VERSION")))
-            .timeout(Duration::from_secs(120)),
-        &url,
-    )?
+    let settings = crate::settings::current();
+    let mut builder = reqwest::Client::builder()
+        .user_agent(concat!("Oxide/", env!("CARGO_PKG_VERSION")))
+        .danger_accept_invalid_certs(!settings.verify_tls)
+        .redirect(if settings.follow_redirects {
+            reqwest::redirect::Policy::limited(10)
+        } else {
+            reqwest::redirect::Policy::none()
+        });
+    if settings.timeout_secs > 0 {
+        builder = builder.timeout(Duration::from_secs(settings.timeout_secs));
+    }
+    let client = crate::certs::apply(builder, &url)?
     .build()
     .map_err(describe_error)?;
 

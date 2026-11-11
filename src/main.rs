@@ -12,6 +12,7 @@ mod media;
 mod model;
 mod oauth;
 mod postman;
+mod settings;
 mod storage;
 mod suggest;
 mod theme;
