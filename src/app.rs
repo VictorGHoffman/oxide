@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use iced::widget::{operation, scrollable, text_editor};
 use iced::{event, keyboard, mouse, window, Event, Point, Size, Subscription, Task, Theme};
 
+use crate::backup;
 use crate::certs::{self, CertKind, ClientCert};
 use crate::curl;
 use crate::htmlview;
@@ -217,6 +218,14 @@ pub enum Message {
     // Variables
     OpenVariables(VarScope),
     CloseVariables,
+
+    // Backup
+    OpenBackup,
+    CloseBackup,
+    ExportBackup,
+    RestoreBackup,
+    /// The text of the backup file that was picked (`None` when cancelled).
+    BackupPicked(Result<Option<String>, String>),
 
     // Certificates
     OpenCerts,
@@ -456,6 +465,7 @@ pub struct Oxide {
     /// Whether each certificate's files could be read (same order as `certs`).
     pub cert_status: Vec<Result<(), String>>,
     pub certs_open: bool,
+    pub backup_open: bool,
     pub sidebar_visible: bool,
     pub sidebar_width: f32,
     /// `true` = response docked on the right, `false` = below the editor.
@@ -513,6 +523,7 @@ impl Oxide {
             certs,
             cert_status,
             certs_open: false,
+            backup_open: false,
             sidebar_visible: true,
             sidebar_width: 280.0,
             response_right: false,
@@ -1392,6 +1403,64 @@ impl Oxide {
             }
             Message::SearchChanged(text) => self.search = text,
             Message::CloseVariables => self.vars_dialog = None,
+            Message::OpenBackup => {
+                self.menu = None;
+                self.commit_rename();
+                self.backup_open = true;
+            }
+            Message::CloseBackup => self.backup_open = false,
+            Message::ExportBackup => {
+                self.commit_rename();
+                let snapshot = self.tree.snapshot(&self.saved);
+                match backup::export(&snapshot, &self.globals) {
+                    Ok(json) => {
+                        let name = format!("oxide-backup-{}.json", backup::date(oauth::now()));
+                        return Task::perform(save_backup(name, json), Message::ExportDone);
+                    }
+                    Err(e) => {
+                        self.notice = Some(Notice {
+                            text: format!("Export failed: {e}"),
+                            error: true,
+                        });
+                    }
+                }
+            }
+            Message::RestoreBackup => return Task::perform(pick_backup(), Message::BackupPicked),
+            Message::BackupPicked(result) => match result {
+                Ok(None) => {}
+                Err(e) => {
+                    self.notice = Some(Notice {
+                        text: format!("Restore failed: {e}"),
+                        error: true,
+                    });
+                }
+                Ok(Some(text)) => match backup::parse(&text) {
+                    Err(e) => {
+                        self.notice = Some(Notice {
+                            text: format!("Restore failed: {e}"),
+                            error: true,
+                        });
+                    }
+                    Ok(restored) => {
+                        let requests = restored.tree.requests().len();
+                        let collections = self.tree.merge(restored.tree);
+                        for global in restored.globals.into_iter().filter(|g| !g.key.trim().is_empty()) {
+                            set_variable(&mut self.globals, &global.key, global.value);
+                        }
+                        keep_trailing_blank(&mut self.globals);
+                        self.save_variables(VarScope::Global);
+                        self.persist();
+                        self.backup_open = false;
+                        self.notice = Some(Notice {
+                            text: format!(
+                                "Restored {collections} collection{} ({requests} requests) and the global variables.",
+                                if collections == 1 { "" } else { "s" }
+                            ),
+                            error: false,
+                        });
+                    }
+                },
+            },
             Message::OpenCerts => {
                 self.menu = None;
                 self.commit_rename();
@@ -1805,6 +1874,14 @@ impl Oxide {
                 Shortcut::Escape => self.confirm_delete = None,
                 Shortcut::Confirm => return self.update(Message::ConfirmDelete),
                 _ => {}
+            }
+            return Task::none();
+        }
+
+        // The backup dialog too.
+        if self.backup_open {
+            if matches!(shortcut, Shortcut::Escape) {
+                self.backup_open = false;
             }
             return Task::none();
         }
@@ -2899,6 +2976,38 @@ async fn save_collection(file_name: String, json: String) -> Result<Option<Strin
         .await
         .map_err(|e| e.to_string())?;
     Ok(Some(file.file_name()))
+}
+
+/// Asks where to save the backup and writes it there.
+async fn save_backup(file_name: String, json: String) -> Result<Option<String>, String> {
+    let Some(file) = rfd::AsyncFileDialog::new()
+        .set_title("Export backup")
+        .set_file_name(file_name)
+        .add_filter("Oxide backup", &["json"])
+        .save_file()
+        .await
+    else {
+        return Ok(None);
+    };
+    file.write(json.as_bytes())
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(Some(file.file_name()))
+}
+
+/// Lets the user pick a backup file and reads it.
+async fn pick_backup() -> Result<Option<String>, String> {
+    let Some(file) = rfd::AsyncFileDialog::new()
+        .set_title("Restore backup")
+        .add_filter("Oxide backup", &["json"])
+        .pick_file()
+        .await
+    else {
+        return Ok(None);
+    };
+    String::from_utf8(file.read().await)
+        .map(Some)
+        .map_err(|_| "The file is not a text file.".to_string())
 }
 
 /// A collection name that is safe to use as a file name on every platform.

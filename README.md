@@ -35,6 +35,11 @@ Use it to build, send and inspect HTTP requests, organise them into collections,
 - Show the data file's folder from the right-click menu.
 - Import and export **Postman Collection v2.1**, including binary bodies and OAuth 2.0 settings.
 
+### Backup
+- **Backup** (bottom of the sidebar) exports every collection, with its variables, and the global variables to a single `.json` file.
+- **Restore** adds the collections of a backup next to the ones you already have and sets its global variables. Nothing is deleted or overwritten, so it is safe to restore on a computer that already has data.
+- Certificates and OAuth 2.0 tokens are not included: they point to files on the computer and hold secrets.
+
 ### Variables
 - `{{name}}` placeholders work in the URL, params, headers, cookies, body and auth.
 - Global variables and per-collection variables (a collection variable wins over a global one with the same name).

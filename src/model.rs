@@ -794,6 +794,28 @@ impl Tree {
         walk(&mut self.roots);
     }
 
+    /// Adds every collection of `other` next to the existing ones (new ids; a name that is
+    /// already taken gets " (restored)"). Returns how many collections were added.
+    pub fn merge(&mut self, other: Tree) -> usize {
+        let count = other.roots.len();
+        for mut node in other.roots {
+            let taken = |roots: &[Node], name: &str| roots.iter().any(|n| n.name == name);
+            if taken(&self.roots, &node.name) {
+                let base = format!("{} (restored)", node.name);
+                let mut name = base.clone();
+                let mut n = 2;
+                while taken(&self.roots, &name) {
+                    name = format!("{base} {n}");
+                    n += 1;
+                }
+                node.name = name;
+            }
+            reassign_ids(&mut node, &mut self.next_id);
+            self.roots.push(node);
+        }
+        count
+    }
+
     pub fn duplicate(&mut self, id: Id) -> Option<Id> {
         let parent = self.parent_of(id)?;
         let mut next = self.next_id;
@@ -844,6 +866,23 @@ mod tests {
         r.params_from_url();
         r.url_from_params();
         assert_eq!(r.url, "https://x.test/a");
+    }
+
+    #[test]
+    fn merging_keeps_both_sets() {
+        let mut a = Tree::new();
+        let first = a.add_collection();
+        a.add_request(first);
+        let mut b = a.clone();
+        let added = a.merge(b.clone());
+        assert_eq!(added, 1);
+        assert_eq!(a.roots.len(), 2);
+        assert_eq!(a.roots[1].name, "New Collection (restored)");
+        let ids: Vec<Id> = a.roots.iter().flat_map(|r| std::iter::once(r.id).chain(r.children.iter().map(|c| c.id))).collect();
+        assert_eq!(ids.len(), 4);
+        assert!(ids.iter().all(|id| ids.iter().filter(|x| *x == id).count() == 1));
+        a.merge(std::mem::take(&mut b));
+        assert_eq!(a.roots[2].name, "New Collection (restored) 2");
     }
 
     #[test]

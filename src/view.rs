@@ -575,6 +575,9 @@ impl Oxide {
         if self.certs_open {
             layers = layers.push(self.certs_dialog());
         }
+        if self.backup_open {
+            layers = layers.push(self.backup_dialog());
+        }
         if let Some(ids) = &self.confirm_delete {
             if let Some(dialog) = self.delete_dialog(ids) {
                 layers = layers.push(dialog);
@@ -823,6 +826,10 @@ impl Oxide {
                         .padding(Padding::from([5, 10]))
                         .style(pill_style(false))
                         .on_press(Message::OpenCerts),
+                    button(text("Backup").size(12))
+                        .padding(Padding::from([5, 10]))
+                        .style(pill_style(false))
+                        .on_press(Message::OpenBackup),
                 ]
                 .spacing(6),
                 row![
@@ -2095,6 +2102,73 @@ impl Oxide {
         );
 
         Some(stack![dim, container(opaque(card)).center(Fill)].into())
+    }
+
+    /// Export everything to one file, or bring it back.
+    fn backup_dialog(&self) -> Element<'_, Message> {
+        let collections = self.tree.roots.len();
+        let requests = self.tree.requests().len();
+
+        let card = container(
+            column![
+                text("Backup").size(17).font(BOLD),
+                text(format!(
+                    "Right now: {collections} collection{}, {requests} request{} and {} global variable{}.",
+                    if collections == 1 { "" } else { "s" },
+                    if requests == 1 { "" } else { "s" },
+                    self.globals.iter().filter(|g| !g.key.trim().is_empty()).count(),
+                    if self.globals.iter().filter(|g| !g.key.trim().is_empty()).count() == 1 { "" } else { "s" },
+                ))
+                .size(13)
+                .style(muted),
+                column![
+                    text("Export").size(14).font(SEMIBOLD),
+                    text("Saves every collection (with its variables) and the global variables in a single file. Changes you have not saved with Ctrl+S are not included.")
+                        .size(12)
+                        .style(muted),
+                    button(text("Export backup…").size(13).center())
+                        .padding(Padding::from([7, 14]))
+                        .style(primary_button)
+                        .on_press(Message::ExportBackup),
+                ]
+                .spacing(6),
+                column![
+                    text("Restore").size(14).font(SEMIBOLD),
+                    text("Adds the collections of a backup next to yours (nothing is deleted or overwritten) and sets its global variables. A global with the same name gets the value from the backup.")
+                        .size(12)
+                        .style(muted),
+                    button(text("Restore backup…").size(13).center())
+                        .padding(Padding::from([7, 14]))
+                        .style(pill_style(false))
+                        .on_press(Message::RestoreBackup),
+                ]
+                .spacing(6),
+                text("Certificates and OAuth 2.0 tokens are not part of a backup: they point to files on this computer and hold secrets.")
+                    .size(12)
+                    .style(muted),
+                row![
+                    space().width(Fill),
+                    button(text("Close").size(13).center())
+                        .padding(Padding::from([7, 18]))
+                        .style(primary_button)
+                        .on_press(Message::CloseBackup),
+                ],
+            ]
+            .spacing(14),
+        )
+        .padding(20)
+        .width(520)
+        .style(card_style);
+
+        let dim = opaque(
+            mouse_area(container(space()).width(Fill).height(Fill).style(|_| {
+                container::Style::default().background(Color::from_rgba(0.0, 0.0, 0.0, 0.55))
+            }))
+            .on_press(Message::CloseBackup)
+            .on_right_press(Message::CloseBackup),
+        );
+
+        stack![dim, container(opaque(card)).center(Fill)].into()
     }
 
     /// Client certificates and private authorities, by host.
