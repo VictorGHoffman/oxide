@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use iced::widget::{operation, scrollable, text_editor};
 use iced::{event, keyboard, mouse, window, Event, Point, Size, Subscription, Task, Theme};
 
+use crate::apidog;
 use crate::backup;
 use crate::certs::{self, CertKind, ClientCert};
 use crate::curl;
@@ -131,6 +132,7 @@ pub enum MenuAction {
     CloseOthers,
     CloseAll,
     ImportCollection,
+    ImportApidogFolder,
     ExportCollection,
     EditVariables,
     ShowInFolder,
@@ -265,8 +267,8 @@ pub enum Message {
     DragEnd,
 
     // Import / export
-    /// `(file name, file contents)` for every file picked; empty when cancelled.
-    ImportPicked(Result<Vec<(String, String)>, String>),
+    /// Everything picked to import; empty when cancelled.
+    ImportPicked(Result<Vec<ImportSource>, String>),
     /// `Some(file name)` once written, `None` when the dialog was cancelled.
     ExportDone(Result<Option<String>, String>),
     DismissNotice,
@@ -1104,6 +1106,11 @@ impl Oxide {
                 self.notice = None;
                 return Task::perform(pick_collections(), Message::ImportPicked);
             }
+            MenuAction::ImportApidogFolder => {
+                self.commit_rename();
+                self.notice = None;
+                return Task::perform(pick_apidog_folder(), Message::ImportPicked);
+            }
             MenuAction::EditVariables => {
                 if let Some(id) = node_target {
                     let root = self.tree.ancestors(id).last().copied().unwrap_or(id);
@@ -1419,8 +1426,16 @@ impl Oxide {
                 Ok(files) => {
                     let mut imported = Vec::new();
                     let mut failures = Vec::new();
-                    for (name, content) in &files {
-                        match postman::import(&mut self.tree, content) {
+                    for source in &files {
+                        let (name, result) = match source {
+                            ImportSource::Postman(name, content) => {
+                                (name, postman::import(&mut self.tree, content))
+                            }
+                            ImportSource::Apidog(dir) => {
+                                (&dir.name, apidog::import(&mut self.tree, dir))
+                            }
+                        };
+                        match result {
                             Ok(summary) => imported.push(summary),
                             Err(e) => failures.push(format!("{name}: {e}")),
                         }
@@ -2201,7 +2216,8 @@ impl Oxide {
             command("New Request", "", Some("Ctrl+N"), Message::MenuAction(MenuAction::NewRequest)),
             command("New Folder", "", Some("Ctrl+Shift+N"), Message::MenuAction(MenuAction::NewFolder)),
             command("New Collection", "", None, Message::MenuAction(MenuAction::NewCollection)),
-            command("Import Collection", "Postman v2.1", Some("Ctrl+O"), Message::MenuAction(MenuAction::ImportCollection)),
+            command("Import Collection", "Postman v2.1 or Apidog .yaml files", Some("Ctrl+O"), Message::MenuAction(MenuAction::ImportCollection)),
+            command("Import Apidog Folder", "A folder of Apidog .http.yaml requests", None, Message::MenuAction(MenuAction::ImportApidogFolder)),
             command("Export Collection", "", None, Message::MenuAction(MenuAction::ExportCollection)),
             command("Settings", "Theme, requests, certificates, shortcuts", Some("Ctrl+,"), Message::OpenSettings(SettingsTab::Appearance)),
             command("Backup: export or restore everything", "", None, Message::OpenSettings(SettingsTab::Data)),
@@ -3013,11 +3029,24 @@ fn collapse_all(nodes: &mut [Node]) {
 
 // ───────────────────────────── import / export helpers ─────────────────────────────
 
-/// Lets the user pick one or more Postman collection files and reads them.
-async fn pick_collections() -> Result<Vec<(String, String)>, String> {
+/// Something picked to import.
+#[derive(Debug, Clone)]
+pub enum ImportSource {
+    /// `(file name, file contents)` of a Postman collection.
+    Postman(String, String),
+    /// Apidog request files, as one collection.
+    Apidog(apidog::Dir),
+}
+
+/// Lets the user pick Postman collections and/or Apidog request files and
+/// reads them. The Apidog files picked together become one collection, named
+/// after the folder they are in.
+async fn pick_collections() -> Result<Vec<ImportSource>, String> {
     let Some(files) = rfd::AsyncFileDialog::new()
-        .set_title("Import Postman collection")
+        .set_title("Import collection")
+        .add_filter("Postman collection or Apidog request", &["json", "yaml", "yml"])
         .add_filter("Postman collection", &["json"])
+        .add_filter("Apidog request", &["yaml", "yml"])
         .pick_files()
         .await
     else {
@@ -3025,14 +3054,45 @@ async fn pick_collections() -> Result<Vec<(String, String)>, String> {
     };
 
     let mut out = Vec::new();
+    let mut apidog_files = apidog::Dir::default();
     for file in files {
         let bytes = file.read().await;
         let name = file.file_name();
         let text =
             String::from_utf8(bytes).map_err(|_| format!("{name} is not a UTF-8 text file."))?;
-        out.push((name, text.trim_start_matches('\u{feff}').to_string()));
+        let text = text.trim_start_matches('\u{feff}').to_string();
+        if apidog::is_apidog_file(&name) {
+            if apidog_files.name.is_empty() {
+                apidog_files.name = file
+                    .path()
+                    .parent()
+                    .and_then(|p| p.file_name())
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+            }
+            apidog_files.files.push((name, text));
+        } else {
+            out.push(ImportSource::Postman(name, text));
+        }
+    }
+    if !apidog_files.files.is_empty() {
+        out.push(ImportSource::Apidog(apidog_files));
     }
     Ok(out)
+}
+
+/// Lets the user pick a folder of Apidog request files; sub-folders become folders.
+async fn pick_apidog_folder() -> Result<Vec<ImportSource>, String> {
+    let Some(folder) = rfd::AsyncFileDialog::new()
+        .set_title("Import Apidog folder")
+        .pick_folder()
+        .await
+    else {
+        return Ok(Vec::new());
+    };
+    let path = folder.path().to_path_buf();
+    let dir = apidog::read_dir(&path)?;
+    Ok(vec![ImportSource::Apidog(dir)])
 }
 
 /// Whether the response is an HTML page.

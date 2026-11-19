@@ -875,7 +875,7 @@ impl Oxide {
             centered(
                 column![
                     text("No collections yet").size(14).font(SEMIBOLD),
-                    text("Create one, or import a Postman collection.")
+                    text("Create one, or import from Postman or Apidog.")
                         .size(12)
                         .align_x(iced::Center)
                         .style(muted),
@@ -1286,6 +1286,13 @@ impl Oxide {
                     false,
                 ),
                 Item(
+                    "Import Apidog Folder…",
+                    None,
+                    MenuAction::ImportApidogFolder,
+                    true,
+                    false,
+                ),
+                Item(
                     "Export Collection…",
                     None,
                     MenuAction::ExportCollection,
@@ -1315,6 +1322,13 @@ impl Oxide {
                     "Import Collection…",
                     Some("Ctrl+O"),
                     MenuAction::ImportCollection,
+                    true,
+                    false,
+                ),
+                Item(
+                    "Import Apidog Folder…",
+                    None,
+                    MenuAction::ImportApidogFolder,
                     true,
                     false,
                 ),

@@ -24,14 +24,14 @@ pub struct Summary {
     pub warnings: Vec<String>,
 }
 
-struct Counter {
-    requests: usize,
-    folders: usize,
-    warnings: Vec<String>,
+pub(crate) struct Counter {
+    pub(crate) requests: usize,
+    pub(crate) folders: usize,
+    pub(crate) warnings: Vec<String>,
 }
 
 impl Counter {
-    fn warn(&mut self, message: &str) {
+    pub(crate) fn warn(&mut self, message: &str) {
         if !self.warnings.iter().any(|w| w == message) {
             self.warnings.push(message.to_string());
         }
@@ -41,7 +41,7 @@ impl Counter {
 // ───────────────────────────── helpers ─────────────────────────────
 
 /// Strings, numbers and booleans as text; anything else (or nothing) as "".
-fn text(value: Option<&Value>) -> String {
+pub(crate) fn text(value: Option<&Value>) -> String {
     match value {
         Some(Value::String(s)) => s.clone(),
         Some(Value::Number(n)) => n.to_string(),
@@ -50,7 +50,7 @@ fn text(value: Option<&Value>) -> String {
     }
 }
 
-fn items<'a>(value: &'a Value, key: &str) -> &'a [Value] {
+pub(crate) fn items<'a>(value: &'a Value, key: &str) -> &'a [Value] {
     value
         .get(key)
         .and_then(Value::as_array)
@@ -233,7 +233,7 @@ pub fn import(tree: &mut Tree, source: &str) -> Result<Summary, String> {
     })
 }
 
-fn collapse_folders(nodes: &mut [Node]) {
+pub(crate) fn collapse_folders(nodes: &mut [Node]) {
     for node in nodes {
         node.expanded = false;
         collapse_folders(&mut node.children);
@@ -419,13 +419,13 @@ fn parse_request(value: &Value, inherited_auth: Option<&Value>, counter: &mut Co
     req
 }
 
-fn set_url_from_string(req: &mut Request, raw: &str) {
+pub(crate) fn set_url_from_string(req: &mut Request, raw: &str) {
     let (base, query) = split_query(raw);
     req.url = base.to_string();
     parse_query(query, &mut req.params);
 }
 
-fn finish_all(req: &mut Request) {
+pub(crate) fn finish_all(req: &mut Request) {
     finish(&mut req.params);
     finish(&mut req.headers);
     finish(&mut req.cookies);
@@ -433,7 +433,7 @@ fn finish_all(req: &mut Request) {
     finish(&mut req.url_encoded);
 }
 
-fn apply_auth(req: &mut Request, auth: &Value, counter: &mut Counter) {
+pub(crate) fn apply_auth(req: &mut Request, auth: &Value, counter: &mut Counter) {
     let Some(kind) = auth.get("type").and_then(Value::as_str) else {
         return;
     };

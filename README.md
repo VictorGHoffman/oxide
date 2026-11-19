@@ -34,6 +34,7 @@ Use it to build, send and inspect HTTP requests, organise them into collections,
 - Rename, duplicate and delete from the right-click menu or with keyboard shortcuts.
 - Folders and collections have their own icons in the tree. Show the data file's folder from the right-click menu.
 - Import and export **Postman Collection v2.1**, including binary bodies and OAuth 2.0 settings.
+- Import **Apidog** request files (`.http.yaml`): pick the files with **Import Collection**, or a whole folder with **Import Apidog Folder** (sub-folders become folders).
 
 ### Backup
 - **Settings → Data & backup** exports every collection, with its variables, and the global variables to a single `.json` file.

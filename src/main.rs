@@ -1,5 +1,6 @@
 #![windows_subsystem = "windows"]
 
+mod apidog;
 mod app;
 mod backup;
 mod certs;
