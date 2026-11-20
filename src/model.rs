@@ -562,6 +562,14 @@ fn unique_copy_name(siblings: &[Node], name: &str) -> String {
         .expect("infinite iterator")
 }
 
+/// Where a node sits in the tree (used to undo / redo moves).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NodePosition {
+    pub id: Id,
+    pub parent: Option<Id>,
+    pub index: usize,
+}
+
 /// Where a dragged node lands relative to the row it is dropped on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DropZone {
@@ -767,6 +775,60 @@ impl Tree {
                 };
                 let at = list.iter().position(|n| n.id == target).unwrap_or(list.len());
                 list.insert(if zone == DropZone::After { at + 1 } else { at }, node);
+            }
+        }
+        true
+    }
+
+    /// Where each of `ids` sits right now: `(id, parent, index among its siblings)`.
+    pub fn positions(&self, ids: &[Id]) -> Vec<NodePosition> {
+        ids.iter()
+            .filter_map(|&id| {
+                let parent = self.parent_of(id)?;
+                let list = match parent {
+                    None => &self.roots,
+                    Some(p) => &self.get(p)?.children,
+                };
+                let index = list.iter().position(|n| n.id == id)?;
+                Some(NodePosition { id, parent, index })
+            })
+            .collect()
+    }
+
+    /// Puts nodes back where [`Tree::positions`] saw them. Nodes (or parents) that no
+    /// longer exist are skipped. Returns whether anything moved.
+    pub fn restore_positions(&mut self, positions: &[NodePosition]) -> bool {
+        let ids: Vec<Id> = positions.iter().map(|p| p.id).collect();
+        let mut valid: Vec<NodePosition> = positions
+            .iter()
+            .filter(|p| self.get(p.id).is_some())
+            .filter(|p| {
+                p.parent.is_none_or(|parent| {
+                    self.get(parent).is_some()
+                        && !ids.contains(&parent)
+                        && !self.ancestors(parent).iter().any(|a| ids.contains(a))
+                })
+            })
+            .copied()
+            .collect();
+        if valid.is_empty() {
+            return false;
+        }
+        let mut taken: HashMap<Id, Node> = HashMap::new();
+        for p in &valid {
+            if let Some(node) = self.remove(p.id) {
+                taken.insert(p.id, node);
+            }
+        }
+        // Inserting by increasing index rebuilds every sibling list exactly.
+        valid.sort_by_key(|p| p.index);
+        for p in valid {
+            let Some(node) = taken.remove(&p.id) else {
+                continue;
+            };
+            if let Some(list) = siblings_mut(&mut self.roots, p.parent) {
+                let at = p.index.min(list.len());
+                list.insert(at, node);
             }
         }
         true

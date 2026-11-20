@@ -1054,7 +1054,7 @@ impl Oxide {
         let selected = self.is_selected(id);
         let hovered = self.hovered == Some(id);
         let dragging = self.node_drag.as_ref().filter(|d| d.active);
-        let being_dragged = dragging.is_some_and(|d| d.id == id);
+        let being_dragged = dragging.is_some_and(|d| d.ids.contains(&id));
         let drop_zone = dragging
             .and_then(|d| d.target)
             .filter(|(target, _)| *target == id)
@@ -1212,6 +1212,7 @@ impl Oxide {
         let drag = self.node_drag.as_ref().filter(|d| d.active)?;
         let node = self.tree.get(drag.id)?;
         let label = match &node.kind {
+            _ if drag.ids.len() > 1 => format!("{} items", drag.ids.len()),
             Kind::Request(req) => format!("{}  {}", req.method.short(), node.name),
             _ => node.name.clone(),
         };

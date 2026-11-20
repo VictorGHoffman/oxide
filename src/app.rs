@@ -360,9 +360,24 @@ pub struct TabDrag {
     pub moved: bool,
 }
 
+/// A sidebar move that Ctrl+Z / Ctrl+Y can undo / redo.
+pub struct MoveStep {
+    pub seq: u64,
+    pub before: Vec<NodePosition>,
+    pub after: Vec<NodePosition>,
+    /// The selection after the move: `(primary, others)`.
+    pub selection: (Id, Vec<Id>),
+}
+
 /// A sidebar node being dragged to a new place.
 pub struct NodeDrag {
+    /// The row that was pressed.
     pub id: Id,
+    /// Every node being moved (the outermost selected nodes, in tree order).
+    pub ids: Vec<Id>,
+    /// The press landed on an item of a multi-selection: if it turns out to be a plain
+    /// click (no drag), the selection collapses to that item on release.
+    pub collapse_on_click: bool,
     pub start: Point,
     /// Becomes `true` once the mouse has moved far enough to count as a drag.
     pub active: bool,
@@ -456,6 +471,10 @@ pub struct Runtime {
     pub undo: Vec<Request>,
     /// Versions undone, for Ctrl+Y.
     pub redo: Vec<Request>,
+    /// When each `undo` / `redo` entry was recorded (see [`Oxide::history_seq`]), so
+    /// Ctrl+Z can tell whether a request edit or a sidebar move is the most recent.
+    pub undo_seq: Vec<u64>,
+    pub redo_seq: Vec<u64>,
     pub last_edit: Option<Instant>,
     /// Result of the last "Get new token": `(is_error, text)`.
     pub oauth_status: Option<(bool, String)>,
@@ -484,6 +503,8 @@ impl Runtime {
             script_output: Vec::new(),
             undo: Vec::new(),
             redo: Vec::new(),
+            undo_seq: Vec::new(),
+            redo_seq: Vec::new(),
             last_edit: None,
             oauth_status: None,
             oauth_busy: false,
@@ -557,6 +578,11 @@ pub struct Oxide {
     /// Where a Shift+click range starts.
     pub anchor: Option<Id>,
     pub modifiers: keyboard::Modifiers,
+    /// Sidebar moves that can be undone / redone (most recent last).
+    pub move_undo: Vec<MoveStep>,
+    pub move_redo: Vec<MoveStep>,
+    /// Counter that orders every undo step (request edits and sidebar moves).
+    pub history_seq: u64,
     last_session: storage::Session,
 }
 
@@ -615,6 +641,9 @@ impl Oxide {
             extra: HashSet::new(),
             anchor: selected,
             modifiers: keyboard::Modifiers::default(),
+            move_undo: Vec::new(),
+            move_redo: Vec::new(),
+            history_seq: 0,
             last_session: storage::Session::default(),
         };
         app.sync_saved();
@@ -1311,9 +1340,19 @@ impl Oxide {
                 } else if self.modifiers.command() {
                     self.toggle_selection(id);
                 } else {
-                    self.select_only(id);
+                    // Pressing an item that is part of a multi-selection keeps the
+                    // selection so all of it can be dragged together.
+                    let multi = self.is_selected(id) && !self.extra.is_empty();
+                    let ids = if multi {
+                        self.action_targets(Some(id))
+                    } else {
+                        self.select_only(id);
+                        vec![id]
+                    };
                     self.node_drag = Some(NodeDrag {
                         id,
+                        ids,
+                        collapse_on_click: multi,
                         start: self.cursor,
                         active: false,
                         target: None,
@@ -2106,11 +2145,11 @@ impl Oxide {
                 Task::none()
             }
             Shortcut::Undo => {
-                self.step_history(false);
+                self.undo_redo(false);
                 Task::none()
             }
             Shortcut::Redo => {
-                self.step_history(true);
+                self.undo_redo(true);
                 Task::none()
             }
             Shortcut::ToggleSidebar => {
@@ -2532,15 +2571,82 @@ impl Oxide {
             return;
         };
 
+        self.history_seq += 1;
+        let seq = self.history_seq;
         let burst = rt.last_edit.is_some_and(|t| t.elapsed() < HISTORY_MERGE);
         rt.last_edit = Some(Instant::now());
         rt.redo.clear();
+        rt.redo_seq.clear();
         if burst && !rt.undo.is_empty() {
-            return; // part of the step that is already recorded
+            // Part of the step that is already recorded: it is now the most recent.
+            if let Some(last) = rt.undo_seq.last_mut() {
+                *last = seq;
+            }
+            return;
         }
         rt.undo.push(before);
+        rt.undo_seq.push(seq);
         if rt.undo.len() > HISTORY_LIMIT {
             rt.undo.remove(0);
+            rt.undo_seq.remove(0);
+        }
+    }
+
+    /// Ctrl+Z / Ctrl+Y: undoes or redoes whichever is more recent, an edit of the
+    /// active request or a move in the sidebar.
+    fn undo_redo(&mut self, redo: bool) {
+        let request_seq = self.active.and_then(|id| self.runtime.get(&id)).and_then(|rt| {
+            if redo { rt.redo_seq.last() } else { rt.undo_seq.last() }.copied()
+        });
+        let move_seq = if redo { self.move_redo.last() } else { self.move_undo.last() }
+            .map(|s| s.seq);
+        match (request_seq, move_seq) {
+            (Some(r), Some(m)) if m > r => self.step_moves(redo),
+            (None, Some(_)) => self.step_moves(redo),
+            _ => self.step_history(redo),
+        }
+    }
+
+    /// Records a sidebar move so it can be undone.
+    fn record_move(&mut self, before: Vec<NodePosition>, after: Vec<NodePosition>, selection: (Id, Vec<Id>)) {
+        self.history_seq += 1;
+        self.move_redo.clear();
+        self.move_undo.push(MoveStep {
+            seq: self.history_seq,
+            before,
+            after,
+            selection,
+        });
+        if self.move_undo.len() > HISTORY_LIMIT {
+            self.move_undo.remove(0);
+        }
+    }
+
+    /// Undoes (`redo == false`) or redoes the last sidebar move.
+    fn step_moves(&mut self, redo: bool) {
+        let step = if redo { self.move_redo.pop() } else { self.move_undo.pop() };
+        let Some(mut step) = step else {
+            return;
+        };
+        let positions = if redo { &step.after } else { &step.before };
+        if self.tree.restore_positions(positions) {
+            for p in positions {
+                self.tree.expand_ancestors(p.id);
+            }
+            let (primary, others) = &step.selection;
+            if self.tree.get(*primary).is_some() {
+                self.select_only(*primary);
+                self.extra = others.iter().copied().filter(|id| self.tree.get(*id).is_some()).collect();
+            }
+            self.persist();
+        }
+        // The step goes to the other stack, newest there.
+        self.history_seq += 1;
+        step.seq = self.history_seq;
+        if redo {
+            self.move_undo.push(step);
+        } else {
+            self.move_redo.push(step);
         }
     }
 
@@ -2560,10 +2666,16 @@ impl Oxide {
         let Some(target) = target else {
             return;
         };
+        self.history_seq += 1;
+        let seq = self.history_seq;
         if redo {
+            rt.redo_seq.pop();
             rt.undo.push(current);
+            rt.undo_seq.push(seq);
         } else {
+            rt.undo_seq.pop();
             rt.redo.push(current);
+            rt.redo_seq.push(seq);
         }
         rt.last_edit = None;
 
@@ -2588,6 +2700,8 @@ impl Oxide {
         if let Some(rt) = self.runtime.get_mut(&id) {
             rt.undo.clear();
             rt.redo.clear();
+            rt.undo_seq.clear();
+            rt.redo_seq.clear();
             rt.last_edit = None;
         }
         let Some(saved) = self.saved.get(&id).cloned() else {
@@ -2639,12 +2753,13 @@ impl Oxide {
         if !drag.active {
             return;
         }
-        let dragged = drag.id;
+        let ids = drag.ids.clone();
         let over_container = self.tree.get(row).is_some_and(Node::is_container);
-        let dragged_collection = self
-            .tree
-            .get(dragged)
-            .is_some_and(|n| matches!(n.kind, Kind::Collection));
+        let dragged_collection = ids.iter().any(|id| {
+            self.tree
+                .get(*id)
+                .is_some_and(|n| matches!(n.kind, Kind::Collection))
+        });
 
         let ratio = y / ROW_HEIGHT;
         let wanted = if over_container && !dragged_collection {
@@ -2661,10 +2776,18 @@ impl Oxide {
             DropZone::After
         };
 
-        let target = self
-            .tree
-            .drop_zone(dragged, row, wanted)
-            .map(|zone| (row, zone));
+        // The drop is only allowed when every dragged node can land there the same way.
+        let mut zone = None;
+        for id in &ids {
+            match self.tree.drop_zone(*id, row, wanted) {
+                Some(z) if zone.is_none_or(|prev| prev == z) => zone = Some(z),
+                _ => {
+                    zone = None;
+                    break;
+                }
+            }
+        }
+        let target = zone.map(|zone| (row, zone));
         if let Some(drag) = &mut self.node_drag {
             drag.target = target;
         }
@@ -2676,16 +2799,43 @@ impl Oxide {
             return;
         };
         if !drag.active {
+            if drag.collapse_on_click {
+                self.select_only(drag.id);
+            }
             return;
         }
         let Some((target, zone)) = drag.target else {
             return;
         };
-        if self.tree.move_node(drag.id, target, zone) {
-            self.tree.expand_ancestors(drag.id);
-            self.select_only(drag.id);
-            self.persist();
+        // Each node is put right before / right after the target, so walking the list
+        // forwards (Before, Inside) or backwards (After) keeps their original order.
+        let mut moved = Vec::new();
+        let before = self.tree.positions(&drag.ids);
+        let order: Vec<Id> = if zone == DropZone::After {
+            drag.ids.iter().rev().copied().collect()
+        } else {
+            drag.ids.clone()
+        };
+        for id in order {
+            if self.tree.move_node(id, target, zone) {
+                moved.push(id);
+            }
         }
+        if moved.is_empty() {
+            return;
+        }
+        for id in &moved {
+            self.tree.expand_ancestors(*id);
+        }
+        let primary = if moved.contains(&drag.id) { drag.id } else { moved[0] };
+        let others: Vec<Id> = moved.iter().copied().filter(|id| *id != primary).collect();
+        self.select_only(primary);
+        self.extra = others.iter().copied().collect();
+        let before: Vec<NodePosition> =
+            before.into_iter().filter(|p| moved.contains(&p.id)).collect();
+        let after = self.tree.positions(&moved);
+        self.record_move(before, after, (primary, others));
+        self.persist();
     }
 
     /// Resizes the panel whose border is being dragged.
