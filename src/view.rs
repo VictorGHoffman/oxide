@@ -825,7 +825,8 @@ impl Oxide {
         let header = row![
             text("Collections").size(13).font(SEMIBOLD),
             space().width(Fill),
-            tool_button(ic::IMPORT, "Import collection (Ctrl+O)", Message::MenuAction(MenuAction::ImportCollection), tooltip::Position::Bottom),
+            tool_button(ic::IMPORT, "Import files", Message::MenuAction(MenuAction::ImportCollection), tooltip::Position::Bottom),
+            tool_button(ic::FOLDER_OPEN, "Import folder", Message::MenuAction(MenuAction::ImportApidogFolder), tooltip::Position::Bottom),
             button(container(plus_icon()).center(Fill))
                 .width(28)
                 .height(26)
@@ -1288,7 +1289,7 @@ impl Oxide {
                 ),
                 Item(
                     "Import Apidog Folder…",
-                    None,
+                    Some("Ctrl+Shift+O"),
                     MenuAction::ImportApidogFolder,
                     true,
                     false,
@@ -1328,7 +1329,7 @@ impl Oxide {
                 ),
                 Item(
                     "Import Apidog Folder…",
-                    None,
+                    Some("Ctrl+Shift+O"),
                     MenuAction::ImportApidogFolder,
                     true,
                     false,
@@ -3693,6 +3694,7 @@ fn shortcuts_panel<'a>() -> Element<'a, Message> {
                 ("Ctrl+K  /  F1", "Command palette"),
                 ("Ctrl+,", "Settings"),
                 ("Ctrl+O", "Import collection"),
+                ("Ctrl+Shift+O", "Import Apidog folder"),
                 ("Ctrl+B", "Show / hide the sidebar"),
                 ("Ctrl+F", "Search requests"),
                 ("Esc", "Close a window, cancel a drag"),
