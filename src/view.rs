@@ -792,6 +792,11 @@ impl Oxide {
             .into()
         };
         let body = container(body).width(Fill).height(Fill).style(panel_style);
+        let body = column![
+            body,
+            container(space()).width(Fill).height(1).style(divider_style),
+            self.status_bar()
+        ];
 
         let mut layers = stack![body];
         if let Some(menu) = &self.menu {
@@ -817,6 +822,73 @@ impl Oxide {
             layers = layers.push(ghost);
         }
         layers.into()
+    }
+
+    // ───────────────────────── status bar ─────────────────────────
+
+    /// The bottom strip: the latest message on the left, the version on the right.
+    fn status_bar(&self) -> Element<'_, Message> {
+        let red = color!(0xe5534b);
+        let green = color!(0x4caf7d);
+        // A failed save matters more than any other message, so it wins the slot.
+        let message = match (&self.save_error, &self.notice) {
+            (Some(error), _) => Some((format!("Could not save: {error}"), red, false)),
+            (None, Some(notice)) => Some((
+                notice.text.clone(),
+                if notice.error { red } else { green },
+                true,
+            )),
+            (None, None) => None,
+        };
+
+        let left: Element<'_, Message> = match message {
+            Some((full, tint, dismissable)) => {
+                // Multi-line messages (an import report) show on one line; the
+                // tooltip has the whole text.
+                let line = full.lines().collect::<Vec<_>>().join("  ·  ");
+                let label = text(line)
+                    .size(12)
+                    .color(tint)
+                    .wrapping(text::Wrapping::None);
+                let label = tooltip(
+                    container(label).clip(true),
+                    container(text(full).size(12))
+                        .padding(Padding::from([4, 8]))
+                        .max_width(520)
+                        .style(card_style),
+                    tooltip::Position::Top,
+                )
+                .gap(4);
+                let mut line = row![label].spacing(6).align_y(iced::Center);
+                if dismissable {
+                    line = line.push(
+                        button(glyph(ic::CLOSE, 11.0))
+                            .padding(Padding::from([0, 4]))
+                            .style(icon_button_style)
+                            .on_press(Message::DismissNotice),
+                    );
+                }
+                container(line).width(Fill).clip(true).into()
+            }
+            None => space().width(Fill).into(),
+        };
+
+        container(
+            row![
+                left,
+                text(concat!("v", env!("CARGO_PKG_VERSION")))
+                    .size(11)
+                    .style(muted),
+            ]
+            .spacing(12)
+            .align_y(iced::Center),
+        )
+        .width(Fill)
+        .height(24)
+        .padding(Padding::from([0, 12]))
+        .align_y(iced::alignment::Vertical::Center)
+        .style(strip_style)
+        .into()
     }
 
     // ───────────────────────── sidebar ─────────────────────────
@@ -898,40 +970,6 @@ impl Oxide {
             search_box,
             mouse_area(list).on_right_press(Message::SidebarContext)
         ];
-        if let Some(error) = &self.save_error {
-            sidebar = sidebar.push(
-                container(
-                    text(format!("Could not save: {error}"))
-                        .size(12)
-                        .color(color!(0xe5534b)),
-                )
-                .padding(10)
-                .width(Fill),
-            );
-        }
-
-        if let Some(notice) = &self.notice {
-            let tint = if notice.error {
-                color!(0xe5534b)
-            } else {
-                color!(0x4caf7d)
-            };
-            sidebar = sidebar.push(
-                container(
-                    row![
-                        text(notice.text.clone()).size(12).color(tint).width(Fill),
-                        button(glyph(ic::CLOSE, 13.0))
-                            .padding(Padding::from([0, 6]))
-                            .style(icon_button_style)
-                            .on_press(Message::DismissNotice),
-                    ]
-                    .spacing(6),
-                )
-                .padding(10)
-                .width(Fill),
-            );
-        }
-
         sidebar = sidebar.push(
             container(
                 container(space())
@@ -1579,7 +1617,7 @@ impl Oxide {
         } else {
             let height = self.response_height.clamp(
                 MIN_RESPONSE_HEIGHT,
-                (self.window_size.height - 280.0).max(MIN_RESPONSE_HEIGHT),
+                (self.window_size.height - 305.0).max(MIN_RESPONSE_HEIGHT),
             );
             column![
                 editor,

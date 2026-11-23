@@ -273,6 +273,8 @@ pub enum Message {
     /// `Some(file name)` once written, `None` when the dialog was cancelled.
     ExportDone(Result<Option<String>, String>),
     DismissNotice,
+    /// The clock that hides the status bar message once it is old enough.
+    NoticeTick,
 
     // Sidebar
     SelectNode(Id),
@@ -523,6 +525,9 @@ pub struct Notice {
     pub error: bool,
 }
 
+/// How long a status bar message stays before it goes away.
+const NOTICE_DURATION: Duration = Duration::from_secs(5);
+
 pub const MIN_SIDEBAR: f32 = 180.0;
 pub const MAX_SIDEBAR: f32 = 600.0;
 pub const MIN_RESPONSE_WIDTH: f32 = 260.0;
@@ -545,6 +550,8 @@ pub struct Oxide {
     pub confirm_delete: Option<Vec<Id>>,
     pub save_error: Option<String>,
     pub notice: Option<Notice>,
+    /// When `notice` was shown.
+    pub notice_at: Instant,
     /// Index into [`theme::ENTRIES`].
     /// Text typed in the sidebar search box (empty = show everything).
     pub search: String,
@@ -620,6 +627,7 @@ impl Oxide {
             confirm_delete: None,
             save_error,
             notice: None,
+            notice_at: Instant::now(),
             search: String::new(),
             tab_drag: None,
             node_drag: None,
@@ -873,7 +881,22 @@ impl Oxide {
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
-        event::listen_with(handle_event)
+        let events = event::listen_with(handle_event);
+        // A clock only while a message is showing, to hide it after a while.
+        if self.notice.is_some() {
+            Subscription::batch([
+                events,
+                iced::time::every(Duration::from_millis(500)).map(|_| Message::NoticeTick),
+            ])
+        } else {
+            events
+        }
+    }
+
+    /// Shows `notice` in the status bar; it goes away after [`NOTICE_DURATION`].
+    fn show_notice(&mut self, notice: Notice) {
+        self.notice = Some(notice);
+        self.notice_at = Instant::now();
     }
 
     // ───────────────────────── tabs ─────────────────────────
@@ -1157,7 +1180,7 @@ impl Oxide {
                     None => Err("Could not find the Documents folder.".to_string()),
                 };
                 if let Err(e) = result {
-                    self.notice = Some(Notice {
+                    self.show_notice(Notice {
                         text: format!("Could not open the folder: {e}"),
                         error: true,
                     });
@@ -1457,7 +1480,7 @@ impl Oxide {
             }
             Message::ImportPicked(result) => match result {
                 Err(e) => {
-                    self.notice = Some(Notice {
+                    self.show_notice(Notice {
                         text: format!("Import failed: {e}"),
                         error: true,
                     });
@@ -1485,25 +1508,30 @@ impl Oxide {
                         self.select_only(id);
                         self.persist();
                     }
-                    self.notice = Some(import_notice(&imported, &failures));
+                    self.show_notice(import_notice(&imported, &failures));
                 }
             },
             Message::ExportDone(result) => match result {
                 Ok(Some(name)) => {
-                    self.notice = Some(Notice {
+                    self.show_notice(Notice {
                         text: format!("Exported to {name}."),
                         error: false,
                     });
                 }
                 Ok(None) => {}
                 Err(e) => {
-                    self.notice = Some(Notice {
+                    self.show_notice(Notice {
                         text: format!("Export failed: {e}"),
                         error: true,
                     });
                 }
             },
             Message::DismissNotice => self.notice = None,
+            Message::NoticeTick => {
+                if self.notice_at.elapsed() >= NOTICE_DURATION {
+                    self.notice = None;
+                }
+            }
             Message::ConfirmDelete => {
                 if let Some(ids) = self.confirm_delete.take() {
                     for id in ids {
@@ -1594,7 +1622,7 @@ impl Oxide {
                         return Task::perform(save_backup(name, json), Message::ExportDone);
                     }
                     Err(e) => {
-                        self.notice = Some(Notice {
+                        self.show_notice(Notice {
                             text: format!("Export failed: {e}"),
                             error: true,
                         });
@@ -1605,14 +1633,14 @@ impl Oxide {
             Message::BackupPicked(result) => match result {
                 Ok(None) => {}
                 Err(e) => {
-                    self.notice = Some(Notice {
+                    self.show_notice(Notice {
                         text: format!("Restore failed: {e}"),
                         error: true,
                     });
                 }
                 Ok(Some(text)) => match backup::parse(&text) {
                     Err(e) => {
-                        self.notice = Some(Notice {
+                        self.show_notice(Notice {
                             text: format!("Restore failed: {e}"),
                             error: true,
                         });
@@ -1626,7 +1654,7 @@ impl Oxide {
                         keep_trailing_blank(&mut self.globals);
                         self.save_variables(VarScope::Global);
                         self.persist();
-                        self.notice = Some(Notice {
+                        self.show_notice(Notice {
                             text: format!(
                                 "Restored {collections} collection{} ({requests} requests) and the global variables.",
                                 if collections == 1 { "" } else { "s" }
@@ -1890,7 +1918,7 @@ impl Oxide {
                 let full = resolve_link(base.as_deref(), &target);
                 if full.starts_with("http://") || full.starts_with("https://") {
                     if let Err(e) = open_target(&full) {
-                        self.notice = Some(Notice {
+                        self.show_notice(Notice {
                             text: format!("Could not open the link: {e}"),
                             error: true,
                         });
@@ -1911,7 +1939,7 @@ impl Oxide {
                         .map_err(|e| e.to_string())
                         .and_then(|_| open_target(&path.display().to_string()));
                     if let Err(e) = result {
-                        self.notice = Some(Notice {
+                        self.show_notice(Notice {
                             text: format!("Could not open the browser: {e}"),
                             error: true,
                         });
@@ -1969,7 +1997,7 @@ impl Oxide {
                         .map_err(|e| e.to_string())
                         .and_then(|_| open_target(&path.display().to_string()));
                     if let Err(e) = result {
-                        self.notice = Some(Notice {
+                        self.show_notice(Notice {
                             text: format!("Could not open the file: {e}"),
                             error: true,
                         });
@@ -1995,14 +2023,14 @@ impl Oxide {
             }
             Message::ResponseSaved(result) => match result {
                 Ok(Some(name)) => {
-                    self.notice = Some(Notice {
+                    self.show_notice(Notice {
                         text: format!("Saved to {name}."),
                         error: false,
                     });
                 }
                 Ok(None) => {}
                 Err(e) => {
-                    self.notice = Some(Notice {
+                    self.show_notice(Notice {
                         text: format!("Could not save the file: {e}"),
                         error: true,
                     });
@@ -2350,7 +2378,7 @@ impl Oxide {
         let request = vars::resolve(request, &|name| self.lookup_variable(id, name));
         let token = self.tokens.get(&id).map(|t| t.access_token.clone());
         let command = curl::export(&request, token.as_deref());
-        self.notice = Some(Notice {
+        self.show_notice(Notice {
             text: "Copied as cURL.".into(),
             error: false,
         });
@@ -2383,14 +2411,14 @@ impl Oxide {
                 }
                 self.pin(id);
                 self.record_history(id, before);
-                self.notice = Some(Notice {
+                self.show_notice(Notice {
                     text: "Imported the cURL command.".into(),
                     error: false,
                 });
                 true
             }
             Err(e) => {
-                self.notice = Some(Notice {
+                self.show_notice(Notice {
                     text: format!("Could not import the cURL command: {e}"),
                     error: true,
                 });
@@ -2409,7 +2437,7 @@ impl Oxide {
     fn settings_changed(&mut self) {
         settings::set_active(&self.settings);
         if let Err(e) = storage::save_settings(&self.settings) {
-            self.notice = Some(Notice {
+            self.show_notice(Notice {
                 text: format!("Could not save the settings: {e}"),
                 error: true,
             });
@@ -2420,7 +2448,7 @@ impl Oxide {
     fn certs_changed(&mut self) -> Task<Message> {
         certs::set_active(&self.certs);
         if let Err(e) = storage::save_certs(&self.certs) {
-            self.notice = Some(Notice {
+            self.show_notice(Notice {
                 text: format!("Could not save the certificates: {e}"),
                 error: true,
             });
@@ -2866,7 +2894,8 @@ impl Oxide {
                 self.response_width = (drag.size - dx).clamp(MIN_RESPONSE_WIDTH, max);
             }
             Divider::Response => {
-                let max = (window.height - 280.0).max(MIN_RESPONSE_HEIGHT);
+                // 280px for the editor and tabs, 25px for the status bar.
+                let max = (window.height - 305.0).max(MIN_RESPONSE_HEIGHT);
                 self.response_height = (drag.size - dy).clamp(MIN_RESPONSE_HEIGHT, max);
             }
         }
